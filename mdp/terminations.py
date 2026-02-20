@@ -15,21 +15,29 @@ def _slots_w(env: ManagerBasedRLEnv) -> torch.Tensor:
     slots = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)
     return slots
 
+CUBE_KEYS_9 = [
+    "cube_light_s", "cube_light_m", "cube_light_l",
+    "cube_flat_s",  "cube_flat_m",  "cube_flat_l",
+    "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
+]
 
-def _cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
-    c1: RigidObject = env.scene["cube_1"]
-    c2: RigidObject = env.scene["cube_2"]
-    c3: RigidObject = env.scene["cube_3"]
-    return torch.stack([c1.data.root_pos_w, c2.data.root_pos_w, c3.data.root_pos_w], dim=1)  # (N,3,3)
-
+def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
+    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
+        # Default: pick the "medium" instance for each color => indices [1, 4, 7]
+        env.active_cube_indices = torch.zeros((env.num_envs, 3), dtype=torch.long, device=env.device)
+        env.active_cube_indices[:, 0] = 1  # light_m
+        env.active_cube_indices[:, 1] = 4  # flat_m
+        env.active_cube_indices[:, 2] = 7  # dark_m
+    pos9 = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    idx = env.active_cube_indices  # (N,3)
+    return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (N,3,3)
 
 def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
-    cubes = _cube_positions_w(env)[:, :, :2]  # (N,3,2)
-    slots = _slots_w(env)[:, :2].unsqueeze(0)  # (1,4,2)
+    cubes = _active_cube_positions_w(env)[:, :, :2]  # (N,3,2)
+    slots = _slots_w(env)[:, :2].unsqueeze(0)        # (1,4,2)
     d = cubes.unsqueeze(2) - slots.unsqueeze(1)
     dist2 = (d * d).sum(dim=-1)
     return torch.argmin(dist2, dim=2)  # (N,3)
-
 
 def _is_gripper_open(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     # -------------------------
@@ -84,7 +92,7 @@ def move_success(
     to_idx = torch.clamp(cmd[:, 1] - 1, 0, 3)
 
     nearest = _nearest_slot_for_each_cube_xy(env)  # (N,3)
-    cubes_pos = _cube_positions_w(env)  # (N,3,3)
+    cubes_pos = _active_cube_positions_w(env)  # (N,3,3)
     slots = _slots_w(env)  # (4,3)
 
     # Identify target cube as the cube whose nearest slot == from_idx.

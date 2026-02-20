@@ -17,25 +17,35 @@ def _slots_w(env: ManagerBasedRLEnv) -> torch.Tensor:
     return slots
 
 
-def _cube_positions_w(
-    env: ManagerBasedRLEnv,
-    cube_1_cfg: SceneEntityCfg = SceneEntityCfg("cube_1"),
-    cube_2_cfg: SceneEntityCfg = SceneEntityCfg("cube_2"),
-    cube_3_cfg: SceneEntityCfg = SceneEntityCfg("cube_3"),
-) -> torch.Tensor:
-    c1: RigidObject = env.scene[cube_1_cfg.name]
-    c2: RigidObject = env.scene[cube_2_cfg.name]
-    c3: RigidObject = env.scene[cube_3_cfg.name]
-    return torch.stack([c1.data.root_pos_w, c2.data.root_pos_w, c3.data.root_pos_w], dim=1)  # (N,3,3)
+CUBE_KEYS_9 = [
+    "cube_light_s", "cube_light_m", "cube_light_l",
+    "cube_flat_s",  "cube_flat_m",  "cube_flat_l",
+    "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
+]
 
+def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """
+    Returns (N,3,3) positions for the 3 ACTIVE cubes (one per color), per-env.
+    Requires env.active_cube_indices set by reset event.
+    """
+    assert hasattr(env, "active_cube_indices"), "env.active_cube_indices missing. Call reset event randomize_cubes_on_slots first."
 
+    # (N,9,3)
+    pos9 = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)
+
+    idx = env.active_cube_indices  # (N,3) values 0..8
+    idx3 = idx.unsqueeze(-1).expand(-1, -1, 3)  # (N,3,3)
+
+    return pos9.gather(1, idx3)
+
+# Replace old uses:
+# _cube_positions_w(...) -> _active_cube_positions_w(env)
 def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Returns (N,3) slot indices [0..3] for each cube by nearest XY distance."""
-    cubes = _cube_positions_w(env)[:, :, :2]  # (N,3,2)
-    slots = _slots_w(env)[:, :2].unsqueeze(0)  # (1,4,2)
-    d = cubes.unsqueeze(2) - slots.unsqueeze(1)  # (N,3,4,2)
-    dist2 = (d * d).sum(dim=-1)  # (N,3,4)
-    return torch.argmin(dist2, dim=2)  # (N,3)
+    cubes = _active_cube_positions_w(env)[:, :, :2]  # (N,3,2)
+    slots = _slots_w(env)[:, :2].unsqueeze(0)        # (1,4,2)
+    d = cubes.unsqueeze(2) - slots.unsqueeze(1)      # (N,3,4,2)
+    dist2 = (d * d).sum(dim=-1)                      # (N,3,4)
+    return torch.argmin(dist2, dim=2)                # (N,3)
 
 
 def ensure_command_buffer(env: ManagerBasedRLEnv):

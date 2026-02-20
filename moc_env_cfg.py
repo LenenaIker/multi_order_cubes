@@ -143,17 +143,16 @@ class RewardsCfg:
 class EventsCfg:
     """Events (reset-time hooks)."""
 
-    sample_from_to = EventTerm(
-        func=mdp.sample_from_to_on_reset,
-        mode="reset",
-        params={},  # no params needed
-    )
-
     randomize_cubes = EventTerm(
         func=mdp.randomize_cubes_on_slots,
         mode="reset",
     )
 
+    sample_from_to = EventTerm(
+        func=mdp.sample_from_to_on_reset,
+        mode="reset",
+        params={},  # no params needed
+    )
 
 
 

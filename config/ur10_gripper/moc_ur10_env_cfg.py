@@ -30,65 +30,116 @@ def _asset(name: str) -> str:
     """Absolute path to an asset in multi_order_cubes/assets."""
     return os.path.join(_assets_dir(), name)
 
+# -------------------------
+# helper constants
+# -------------------------
+_SCALES = {
+    "s": (0.80, 0.80, 0.80),
+    "m": (1.00, 1.00, 1.00),
+    "l": (1.20, 1.20, 1.20),
+}
+
+_RIGID_PROPS = RigidBodyPropertiesCfg(
+    solver_position_iteration_count=16,
+    solver_velocity_iteration_count=1,
+    max_angular_velocity=1000.0,
+    max_linear_velocity=1000.0,
+    max_depenetration_velocity=5.0,
+    disable_gravity=False,
+)
 
 @configclass
 class UR10LongSuctionMOCSceneCfg(ObjectTableSceneCfg):
-    """Scene: Table + UR10 Long Suction + 3 cubes (fixed colors via local USDs)."""
+    """Scene: Table + UR10 Long Suction + 9 cubes (3 colors x 3 sizes)."""
 
-    cube_1 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Cube_1",
+    # -------------------------
+    # 9 cubes: light/flat/dark x s/m/l
+    # -------------------------
+    cube_light_s = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_light_s",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.40, 0.00, 0.03], rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            # LOCAL asset (light blue)
             usd_path=_asset("blue_block_light.usd"),
-            scale=(0.80, 0.80, 0.80),
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=False,
-            ),
+            scale=_SCALES["s"],
+            rigid_props=_RIGID_PROPS,
+        ),
+    )
+    cube_light_m = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_light_m",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.40, 0.00, 0.03], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=_asset("blue_block_light.usd"),
+            scale=_SCALES["m"],
+            rigid_props=_RIGID_PROPS,
+        ),
+    )
+    cube_light_l = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_light_l",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.40, 0.00, 0.03], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=_asset("blue_block_light.usd"),
+            scale=_SCALES["l"],
+            rigid_props=_RIGID_PROPS,
         ),
     )
 
-    cube_2 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Cube_2",
+    cube_flat_s = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_flat_s",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.55, 0.05, 0.03], rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            # LOCAL asset (base/flat blue)
             usd_path=_asset("blue_block_flat.usd"),
-            scale=(1.00, 1.00, 1.00),
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=False,
-            ),
+            scale=_SCALES["s"],
+            rigid_props=_RIGID_PROPS,
+        ),
+    )
+    cube_flat_m = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_flat_m",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.55, 0.05, 0.03], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=_asset("blue_block_flat.usd"),
+            scale=_SCALES["m"],
+            rigid_props=_RIGID_PROPS,
+        ),
+    )
+    cube_flat_l = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_flat_l",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.55, 0.05, 0.03], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=_asset("blue_block_flat.usd"),
+            scale=_SCALES["l"],
+            rigid_props=_RIGID_PROPS,
         ),
     )
 
-    cube_3 = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Cube_3",
+    cube_dark_s = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_dark_s",
         init_state=RigidObjectCfg.InitialStateCfg(pos=[0.60, -0.10, 0.03], rot=[1, 0, 0, 0]),
         spawn=UsdFileCfg(
-            # LOCAL asset (dark blue)
             usd_path=_asset("blue_block_dark.usd"),
-            scale=(1.20, 1.20, 1.20),
-            rigid_props=RigidBodyPropertiesCfg(
-                solver_position_iteration_count=16,
-                solver_velocity_iteration_count=1,
-                max_angular_velocity=1000.0,
-                max_linear_velocity=1000.0,
-                max_depenetration_velocity=5.0,
-                disable_gravity=False,
-            ),
+            scale=_SCALES["s"],
+            rigid_props=_RIGID_PROPS,
+        ),
+    )
+    cube_dark_m = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_dark_m",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.60, -0.10, 0.03], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=_asset("blue_block_dark.usd"),
+            scale=_SCALES["m"],
+            rigid_props=_RIGID_PROPS,
+        ),
+    )
+    cube_dark_l = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/cube_dark_l",
+        init_state=RigidObjectCfg.InitialStateCfg(pos=[0.60, -0.10, 0.03], rot=[1, 0, 0, 0]),
+        spawn=UsdFileCfg(
+            usd_path=_asset("blue_block_dark.usd"),
+            scale=_SCALES["l"],
+            rigid_props=_RIGID_PROPS,
         ),
     )
 
+    # gripper igual que antes
     surface_gripper: SurfaceGripperCfg = SurfaceGripperCfg(
         prim_path="{ENV_REGEX_NS}/Robot/ee_link/SurfaceGripper",
         max_grip_distance=0.0075,
@@ -96,7 +147,7 @@ class UR10LongSuctionMOCSceneCfg(ObjectTableSceneCfg):
         coaxial_force_limit=5000.0,
         retry_interval=0.05,
     )
-
+    
 
 @configclass
 class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
@@ -114,10 +165,18 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # Slot placement (your existing logic)
-        self.scene.cube_1.init_state.pos = self.slot_positions[0]
-        self.scene.cube_2.init_state.pos = self.slot_positions[1]
-        self.scene.cube_3.init_state.pos = self.slot_positions[2]
+        # Park ALL cube instances at startup; the reset event will activate 3 of them.
+        cube_names = [
+            "cube_light_s", "cube_light_m", "cube_light_l",
+            "cube_flat_s",  "cube_flat_m",  "cube_flat_l",
+            "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
+        ]
+
+        x0, y0, _ = self.slot_positions[0]
+        parked_pos = [x0, y0, -10.0]  # far below the table
+
+        for name in cube_names:
+            getattr(self.scene, name).init_state.pos = parked_pos
 
         # Suction grippers currently require CPU simulation
         self.device = "cpu"

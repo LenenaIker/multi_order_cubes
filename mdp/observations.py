@@ -56,40 +56,29 @@ def command_from_to_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> torch.
     to_oh = torch.nn.functional.one_hot(cmd1, num_classes=num_slots).to(torch.float32)
     return torch.cat([from_oh, to_oh], dim=1)  # (N,8)
 
+CUBE_KEYS_9 = [
+    "cube_light_s", "cube_light_m", "cube_light_l",
+    "cube_flat_s",  "cube_flat_m",  "cube_flat_l",
+    "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
+]
 
-def cubes_slot_occupancy_onehot(
-    env: ManagerBasedRLEnv,
-    cube_1_cfg: SceneEntityCfg = SceneEntityCfg("cube_1"),
-    cube_2_cfg: SceneEntityCfg = SceneEntityCfg("cube_2"),
-    cube_3_cfg: SceneEntityCfg = SceneEntityCfg("cube_3"),
-    num_slots: int = 4,
-) -> torch.Tensor:
-    """
-    Computes which slots are occupied by any cube, based on nearest slot in XY.
+def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
+    assert hasattr(env, "active_cube_indices"), "env.active_cube_indices missing. Call reset event randomize_cubes_on_slots first."
+    pos9 = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    idx = env.active_cube_indices  # (N,3)
+    return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (N,3,3)
 
-    Output:
-        (N, 4) occupancy one-hot/multi-hot (0/1 float)
-    Notes:
-        - This gives the agent explicit 'which slot is empty' signal.
-        - Uses world frame distances in XY for robustness vs base/world; you can switch to base if you prefer.
-    """
-    cube_1: RigidObject = env.scene[cube_1_cfg.name]
-    cube_2: RigidObject = env.scene[cube_2_cfg.name]
-    cube_3: RigidObject = env.scene[cube_3_cfg.name]
+def cubes_slot_occupancy_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> torch.Tensor:
+    cubes_pos_w = _active_cube_positions_w(env)  # (N,3,3)
+    slots_w = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device).unsqueeze(0)  # (1,4,3)
 
-    cubes_pos_w = torch.stack([cube_1.data.root_pos_w, cube_2.data.root_pos_w, cube_3.data.root_pos_w], dim=1)
-    slots_w = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device).unsqueeze(0)       # (1,4,3)
-
-    # XY distances: (N,3,4)
-    d = cubes_pos_w[:, :, :2].unsqueeze(2) - slots_w[:, None, :, :2]
-    dist2 = (d * d).sum(dim=-1)
-
-    nearest = torch.argmin(dist2, dim=2)  # (N,3) slot index 0..3 per cube
+    d = cubes_pos_w[:, :, :2].unsqueeze(2) - slots_w[:, None, :, :2]  # (N,3,4,2)
+    dist2 = (d * d).sum(dim=-1)                                       # (N,3,4)
+    nearest = torch.argmin(dist2, dim=2)                               # (N,3)
 
     occ = torch.zeros((env.num_envs, num_slots), dtype=torch.float32, device=env.device)
-    occ.scatter_(1, nearest, 1.0)  # multi-hot: any cube marks slot as occupied
+    occ.scatter_(1, nearest, 1.0)
     return occ
-
 
 # -------------------------
 # Robot + EE + cubos
@@ -118,26 +107,25 @@ def ee_pose_in_base_frame(
         return ee_quat_b
     return torch.cat([ee_pos_b, ee_quat_b], dim=1)
 
-
-def cubes_poses_in_base_frame(
-    env: ManagerBasedRLEnv,
-    cube_1_cfg: SceneEntityCfg = SceneEntityCfg("cube_1"),
-    cube_2_cfg: SceneEntityCfg = SceneEntityCfg("cube_2"),
-    cube_3_cfg: SceneEntityCfg = SceneEntityCfg("cube_3"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """
-    Cube poses in robot base frame:
-        (cube1 pos 3 + quat 4) + (cube2 7) + (cube3 7) => (N, 21)
-    """
+def cubes_poses_in_base_frame(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     robot: Articulation = env.scene[robot_cfg.name]
     root_pos_w = robot.data.root_pos_w
     root_quat_w = robot.data.root_quat_w
 
-    cubes = [env.scene[cube_1_cfg.name], env.scene[cube_2_cfg.name], env.scene[cube_3_cfg.name]]
+    # Gather active cube poses: (N,3,3) and (N,3,4)
+    assert hasattr(env, "active_cube_indices"), "env.active_cube_indices missing. Call reset event randomize_cubes_on_slots first."
+    cubes_pos_w = _active_cube_positions_w(env)  # (N,3,3)
+
+    # quats
+    cubes_quat9 = torch.stack([env.scene[k].data.root_quat_w for k in CUBE_KEYS_9], dim=1)  # (N,9,4)
+    idx = env.active_cube_indices
+    cubes_quat_w = cubes_quat9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 4))  # (N,3,4)
+
     out = []
-    for c in cubes:
-        pos_b, quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, c.data.root_pos_w, c.data.root_quat_w)
+    for i in range(3):
+        pos_b, quat_b = math_utils.subtract_frame_transforms(
+            root_pos_w, root_quat_w, cubes_pos_w[:, i, :], cubes_quat_w[:, i, :]
+        )
         out.append(torch.cat([pos_b, quat_b], dim=1))
     return torch.cat(out, dim=1)  # (N,21)
 

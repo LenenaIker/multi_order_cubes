@@ -1,0 +1,13 @@
+__pycache__/
+
+kit/cache/
+kit/logs/
+~/.cache/ov/
+~/.cache/nvidia/
+
+logs/
+tensorboard/
+
+.vscode/
+.idea/
+*.iml

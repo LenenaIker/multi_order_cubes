@@ -44,6 +44,11 @@ class NextFlagAction(ActionTerm):
         """
         self._env.moc_next_signal = self._processed.view(-1)
 
+        # ---- step counter for cache invalidation ----
+        # This runs once per env-step, so it is a cheap & reliable global step id.
+        if not hasattr(self._env, "_moc_step_id") or self._env._moc_step_id is None:
+            self._env._moc_step_id = 0
+        self._env._moc_step_id += 1
 
 @configclass
 class NextFlagActionCfg(ActionTermCfg):

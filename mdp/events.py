@@ -88,8 +88,11 @@ def randomize_cubes_on_slots(env, env_ids):
     # -------------------------
     # apply: activate selected 3 (place on slots), park other 6
     # -------------------------
-    parked_pos = origins + torch.tensor([0.0, 0.0, -10.0], device=device, dtype=torch.float32).view(1, 3)  # (M,3)
-    parked_pose = torch.cat([parked_pos, quat], dim=1)  # (M,7)
+    # parked_pos = origins + torch.tensor([0.0, 0.0, -10.0], device=device, dtype=torch.float32).view(1, 3)  # (M,3)
+    # parked_pose = torch.cat([parked_pos, quat], dim=1)  # (M,7)
+
+    # Park inactive cubes away from workspace (avoid placing below groundplane half-space).
+    # NOTE: we park in +X direction, spread in Y per cube_j to avoid inter-cube contact.
 
     # Build per-cube env subsets and write pose/vel
     # We loop 9 cubes; each cube is active in a subset of env_ids
@@ -119,6 +122,16 @@ def randomize_cubes_on_slots(env, env_ids):
         is_inactive_j = ~is_active_j
         if is_inactive_j.any():
             sub_env_ids = env_ids[is_inactive_j]
-            cube.write_root_pose_to_sim(parked_pose[is_inactive_j], env_ids=sub_env_ids)
+
+            # Park inactive cubes away from workspace (avoid placing below groundplane half-space).
+            # Separate per cube_j in Y to avoid collisions between parked cubes.
+            y_off = (float(cube_j) - 4.0) * 0.25  # [-1.0, +1.0] approx
+            parked_pos = origins[is_inactive_j] + torch.tensor(
+                [5.0, y_off, 0.20], device=device, dtype=torch.float32
+            ).view(1, 3)
+
+            parked_pose = torch.cat([parked_pos, quat[is_inactive_j]], dim=1)  # (K,7)
+
+            cube.write_root_pose_to_sim(parked_pose, env_ids=sub_env_ids)
             cube.write_root_velocity_to_sim(zero_vel[is_inactive_j], env_ids=sub_env_ids)
             _maybe_set_visibility(cube, False, sub_env_ids)

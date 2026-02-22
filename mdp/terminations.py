@@ -10,41 +10,40 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-
-def _slots_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
-    if env_ids is None:
-        env_ids = torch.arange(env.num_envs, device=env.device)
-    else:
-        env_ids = env_ids.to(device=env.device)
-    origins = env.scene.env_origins.index_select(0, env_ids)  # (M,3)
-    return slots_local.unsqueeze(0) + origins.unsqueeze(1)    # (M,4,3)
+from .step_cache import (
+    get_slots_w,
+    get_active_cube_pos_w,
+    get_nearest_slot_for_active_cubes_xy,
+)
 
 
-CUBE_KEYS_9 = [
-    "cube_light_s", "cube_light_m", "cube_light_l",
-    "cube_flat_s",  "cube_flat_m",  "cube_flat_l",
-    "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
-]
 
-def _active_cube_positions_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+def _active_cube_lin_vel_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
         raise RuntimeError("env.active_cube_indices missing. Ensure reset event randomize_cubes_on_slots runs before termination.")
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     else:
         env_ids = env_ids.to(device=env.device)
-    pos9_all = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
-    pos9 = pos9_all.index_select(0, env_ids)  # (M,9,3)
+    vel9_all = torch.stack([env.scene[k].data.root_lin_vel_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    vel9 = vel9_all.index_select(0, env_ids)  # (M,9,3)
     idx = env.active_cube_indices.index_select(0, env_ids)  # (M,3)
-    return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (M,3,3)
+    return vel9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (M,3,3)
 
-def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
-    cubes = _active_cube_positions_w(env, env_ids=env_ids)[:, :, :2]  # (M,3,2)
-    slots = _slots_w(env, env_ids=env_ids)[:, :, :2]                  # (M,4,2)
-    d = cubes.unsqueeze(2) - slots.unsqueeze(1)
-    dist2 = (d * d).sum(dim=-1)
-    return torch.argmin(dist2, dim=2)  # (M,3)
+
+def _active_cube_ang_vel_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
+        raise RuntimeError("env.active_cube_indices missing. Ensure reset event randomize_cubes_on_slots runs before termination.")
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device)
+    vel9_all = torch.stack([env.scene[k].data.root_ang_vel_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    vel9 = vel9_all.index_select(0, env_ids)  # (M,9,3)
+    idx = env.active_cube_indices.index_select(0, env_ids)  # (M,3)
+    return vel9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (M,3,3)
+
+
 
 def _is_gripper_open(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     # -------------------------
@@ -84,7 +83,15 @@ def _is_gripper_open(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEn
     return ok1 & ok2
 
 
-def move_success(env: ManagerBasedRLEnv, tol_xy: float = 0.02, tol_z: float = 0.05) -> torch.Tensor:
+def move_success(
+    env: ManagerBasedRLEnv,
+    tol_xy: float = 0.02,
+    tol_z: float = 0.05,
+    require_to_clear: bool = True,
+    clear_tol_xy: float | None = None,
+    require_settled: bool = False,
+    vel_tol: float = 0.20,
+) -> torch.Tensor:
     """Success if the *target cube* (latched if available) is at to_slot.
 
     Returns:
@@ -98,15 +105,15 @@ def move_success(env: ManagerBasedRLEnv, tol_xy: float = 0.02, tol_z: float = 0.
     from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)  # (N,)
     to_idx = torch.clamp(cmd[:, 1] - 1, 0, 3)    # (N,)
 
-    cubes_pos = _active_cube_positions_w(env)  # (N,3,3)
-    slots = _slots_w(env)                      # (N,4,3)
+    cubes_pos = get_active_cube_pos_w(env)  # (N,3,3)
+    slots = get_slots_w(env)               # (N,4,3)
 
     # --- Determine target_cube_id ---
     if hasattr(env, "target_cube_id") and env.target_cube_id is not None:
         target_cube_id = torch.clamp(env.target_cube_id.to(device=env.device), 0, 2)  # (N,)
     else:
         # Infer target cube as the one currently assigned to from_slot (nearest in XY).
-        nearest = _nearest_slot_for_each_cube_xy(env)  # (N,3)
+        nearest = get_nearest_slot_for_active_cubes_xy(env)  # (N,3)
 
         match = (nearest == from_idx.unsqueeze(1))     # (N,3)
         has_match = match.any(dim=1)                   # (N,)
@@ -127,7 +134,33 @@ def move_success(env: ManagerBasedRLEnv, tol_xy: float = 0.02, tol_z: float = 0.
     dy = target_pos[:, 1] - target_slot_pos[:, 1]
     dz = target_pos[:, 2] - target_slot_pos[:, 2]
 
-    ok_xy = (dx * dx + dy * dy) <= (float(tol_xy) ** 2)
+    ok_xy = (dx * dx + dy * dy) <= (float(tol_xy) * 2)
     ok_z = torch.abs(dz) <= float(tol_z)
 
-    return ok_xy & ok_z
+    ok = ok_xy & ok_z
+
+    # --- Optional: require that no *other* cube occupies the to_slot region ---
+    if require_to_clear:
+        if clear_tol_xy is None:
+            clear_tol_xy = max(float(tol_xy) * 1.5, 0.03)
+
+        dxy_all = cubes_pos[:, :, :2] - target_slot_pos[:, :2].unsqueeze(1)  # (N,3,2)
+        dist2_all = (dxy_all * dxy_all).sum(dim=-1)                          # (N,3)
+
+        mask_other = torch.ones_like(dist2_all, dtype=torch.bool)
+        mask_other.scatter_(1, target_cube_id.view(-1, 1), False)
+
+        other_close = (dist2_all <= float(clear_tol_xy) ** 2) & mask_other
+        ok = ok & (~other_close.any(dim=1))
+
+    # --- Optional: require that target cube is settled (low linear+angular velocity) ---
+    if require_settled:
+        lin = _active_cube_lin_vel_w(env)  # (N,3,3)
+        ang = _active_cube_ang_vel_w(env)  # (N,3,3)
+        lin_t = lin[torch.arange(env.num_envs, device=env.device), target_cube_id, :]
+        ang_t = ang[torch.arange(env.num_envs, device=env.device), target_cube_id, :]
+        lin_n = torch.linalg.vector_norm(lin_t, dim=-1)
+        ang_n = torch.linalg.vector_norm(ang_t, dim=-1)
+        ok = ok & (lin_n <= float(vel_tol)) & (ang_n <= float(vel_tol))
+
+    return ok

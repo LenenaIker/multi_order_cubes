@@ -11,6 +11,12 @@ from isaaclab.sensors import FrameTransformer
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+from .step_cache import (
+    get_slots_w,
+    get_active_cube_pos_w,
+    get_active_cube_quat_w,
+    get_nearest_slot_for_active_cubes_xy,
+)
 
 # -------------------------
 # Slots + comando (from,to)
@@ -20,10 +26,7 @@ def slot_positions_in_base_frame(env, robot_cfg=SceneEntityCfg("robot")) -> torc
     root_pos_w = robot.data.root_pos_w
     root_quat_w = robot.data.root_quat_w
 
-    # slot_positions are local to each env; convert to world by adding env_origins
-    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
-    origins = env.scene.env_origins  # (N,3)
-    slots_w = slots_local.unsqueeze(0) + origins.unsqueeze(1)  # (N,4,3)
+    slots_w = get_slots_w(env)  # (N,4,3)
 
     # identity quat (1,4) -> (N,4,4) como view
     ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32)
@@ -68,18 +71,10 @@ def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
     return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (N,3,3)
 
 def cubes_slot_occupancy_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> torch.Tensor:
-    cubes_pos_w = _active_cube_positions_w(env)  # (N,3,3)
-    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
-    slots_w = slots_local.unsqueeze(0) + env.scene.env_origins.unsqueeze(1)  # (N,4,3)
-
-    d = cubes_pos_w[:, :, :2].unsqueeze(2) - slots_w[:, None, :, :2]  # (N,3,4,2)
-    dist2 = (d * d).sum(dim=-1)                                       # (N,3,4)
-    nearest = torch.argmin(dist2, dim=2)                               # (N,3)
-
+    nearest = get_nearest_slot_for_active_cubes_xy(env, num_slots=num_slots)  # (N,3)
     occ = torch.zeros((env.num_envs, num_slots), dtype=torch.float32, device=env.device)
     occ.scatter_(1, nearest, 1.0)
     return occ
-
 # -------------------------
 # Robot + EE + cubos
 # -------------------------
@@ -112,22 +107,23 @@ def cubes_poses_in_base_frame(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg 
     root_pos_w = robot.data.root_pos_w
     root_quat_w = robot.data.root_quat_w
 
-    # Gather active cube poses: (N,3,3) and (N,3,4)
-    assert hasattr(env, "active_cube_indices"), "env.active_cube_indices missing. Call reset event randomize_cubes_on_slots first."
-    cubes_pos_w = _active_cube_positions_w(env)  # (N,3,3)
+    cubes_pos_w = get_active_cube_pos_w(env)   # (N,3,3)
+    cubes_quat_w = get_active_cube_quat_w(env) # (N,3,4)
 
-    # quats
-    cubes_quat9 = torch.stack([env.scene[k].data.root_quat_w for k in CUBE_KEYS_9], dim=1)  # (N,9,4)
-    idx = env.active_cube_indices
-    cubes_quat_w = cubes_quat9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 4))  # (N,3,4)
+    # Vectorize: treat the 3 cubes as a batch of 3 frames per env
+    N = env.num_envs
+    root_pos_rep = root_pos_w.unsqueeze(1).expand(N, 3, 3).reshape(-1, 3)
+    root_quat_rep = root_quat_w.unsqueeze(1).expand(N, 3, 4).reshape(-1, 4)
 
-    out = []
-    for i in range(3):
-        pos_b, quat_b = math_utils.subtract_frame_transforms(
-            root_pos_w, root_quat_w, cubes_pos_w[:, i, :], cubes_quat_w[:, i, :]
-        )
-        out.append(torch.cat([pos_b, quat_b], dim=1))
-    return torch.cat(out, dim=1)  # (N,21)
+    cubes_pos_flat = cubes_pos_w.reshape(-1, 3)
+    cubes_quat_flat = cubes_quat_w.reshape(-1, 4)
+
+    pos_b, quat_b = math_utils.subtract_frame_transforms(
+        root_pos_rep, root_quat_rep, cubes_pos_flat, cubes_quat_flat
+    )
+
+    out = torch.cat([pos_b, quat_b], dim=1).view(N, 3, 7)  # (N,3,7)
+    return out.reshape(N, 21)  # (N,21)
 
 
 def gripper_state(

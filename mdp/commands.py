@@ -84,12 +84,59 @@ def ensure_moc_buffers(env: ManagerBasedRLEnv):
         env.moc_cmd_stamp = -torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
 
 
+def latch_command_state(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> None:
+    """Latch per-command auxiliary state without resampling the command.
+
+    This sets (for env_ids):
+      - env.target_cube_id          (N,) in {0,1,2} for active cubes
+      - env.moc_cmd_cube_pos_xy0    (N,3,2) baseline XY of active cubes
+      - env.moc_cmd_stamp           (N,) episode step stamp (if available)
+
+    Use this when you set commands manually or when buffers were not initialized.
+    """
+    ensure_command_buffer(env)
+    ensure_moc_buffers(env)
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device)
+        if env_ids.numel() == 0:
+            return
+
+    # Need current command + current cube/slot state
+    cmd = env.command_from_to.index_select(0, env_ids).to(device=env.device)
+    from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)  # (M,)
+
+    cubes_pos = _active_cube_positions_w(env, env_ids=env_ids)  # (M,3,3)
+    slots = _slots_w(env, env_ids=env_ids)                      # (M,4,3)
+
+    nearest = _nearest_slot_for_each_cube_xy(env).index_select(0, env_ids)  # (M,3)
+    match = (nearest == from_idx.unsqueeze(1))                              # (M,3)
+    has_match = match.any(dim=1)                                           # (M,)
+    first_match_id = match.to(torch.int64).argmax(dim=1)                   # (M,)
+
+    from_slot_xy = slots[torch.arange(env_ids.numel(), device=env.device), from_idx, :2]  # (M,2)
+    dxy = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)                                  # (M,3,2)
+    dist2_from = (dxy * dxy).sum(dim=-1)                                                    # (M,3)
+    fallback_id = dist2_from.argmin(dim=1)                                                  # (M,)
+
+    target_id = torch.where(has_match, first_match_id, fallback_id)                         # (M,)
+
+    env.target_cube_id[env_ids] = target_id
+    env.moc_cmd_cube_pos_xy0[env_ids] = cubes_pos[:, :, :2]
+    if hasattr(env, "episode_length_buf"):
+        env.moc_cmd_stamp[env_ids] = env.episode_length_buf[env_ids]
+
+
 def set_command_from_to(env: ManagerBasedRLEnv, from_slot_1based: int, to_slot_1based: int):
-    """Set same command for all envs (useful for debugging)."""
+    """Set same command for all envs (debug) AND latch target/baselines."""
     ensure_command_buffer(env)
     ensure_moc_buffers(env)
     env.command_from_to[:, 0] = int(from_slot_1based)
     env.command_from_to[:, 1] = int(to_slot_1based)
+    latch_command_state(env)
+
 
 def sample_command_from_to(
     env: ManagerBasedRLEnv,

@@ -98,26 +98,18 @@ class TerminationsCfg:
 
 @configclass
 class RewardsCfg:
-    # Existing dense shaping
-    # ee_to_cube = RewTerm(func=mdp.reward_ee_to_cube, weight=1.0)
-    # cube_to_slot = RewTerm(func=mdp.reward_target_cube_to_to_slot, weight=1.5)
-    # action_l2 = RewTerm(func=mdp.reward_penalty_action_l2, weight=1.0)
-
-    # IMPORTANT: remove/disable old "success bonus" if it was state-based.
-    # success = RewTerm(func=mdp.reward_success_bonus, weight=1.0)
-
-    # NEW: NEXT / commit rewards
-    next_commit_success = RewTerm(
-        func=mdp.reward_next_commit_success,
+    # Penalize disturbing non-target cubes (reduces pushing/bulldozing behavior)
+    # Keep this BEFORE next_commit_success so its baseline uses the *current* command.
+    disturb_other_cubes = RewTerm(
+        func=mdp.reward_penalty_disturb_other_cubes,
         weight=1.0,
         params=dict(
-            tau=0.0,                 # threshold on moc_next_signal if in [-1,1]
-            stable_window=3,         # M steps stable
-            cooldown_steps=8,        # anti-spam
-            R_commit=8.0,            # positive reward for correct NEXT
-            advance_command=True,    # resample command on correct commit
+            lambda_disturb=0.25,
+            tol_xy=0.01,
         ),
     )
+
+    # (Optional) add other shaping terms here ...
 
     next_commit_fail = RewTerm(
         func=mdp.reward_next_commit_fail,
@@ -138,15 +130,20 @@ class RewardsCfg:
             lambda_wait=0.05,        # small negative while success is stable but NEXT not fired
         ),
     )
-    # Penalize disturbing non-target cubes (reduces pushing/bulldozing behavior)
-    disturb_other_cubes = RewTerm(
-        func=mdp.reward_penalty_disturb_other_cubes,
+
+    # NEW: NEXT / commit reward (put LAST: it can advance the command).
+    next_commit_success = RewTerm(
+        func=mdp.reward_next_commit_success,
         weight=1.0,
         params=dict(
-            lambda_disturb=0.25,
-            tol_xy=0.01,
+            tau=0.0,                 # threshold on moc_next_signal if in [-1,1]
+            stable_window=3,         # M steps stable
+            cooldown_steps=8,        # anti-spam
+            R_commit=8.0,            # positive reward for correct NEXT
+            advance_command=True,    # resample command on correct commit
         ),
     )
+
 
 @configclass
 class EventsCfg:

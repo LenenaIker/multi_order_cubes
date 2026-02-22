@@ -8,8 +8,8 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from .terminations import move_success
-from .commands import sample_command_from_to, ensure_command_buffer, ensure_moc_buffers, _active_cube_positions_w
-
+from .commands import sample_command_from_to, ensure_command_buffer, ensure_moc_buffers
+from .step_cache import get_active_cube_pos_w
 
 # -------------------------
 # Buffers / state helpers
@@ -36,6 +36,11 @@ def _ensure_next_buffers(env: "ManagerBasedRLEnv") -> None:
 
     if not hasattr(env, "moc_last_cooldown_step") or env.moc_last_cooldown_step is None:
         env.moc_last_cooldown_step = torch.full((env.num_envs,), -1, dtype=torch.int32, device=env.device)
+
+    if not hasattr(env, "moc_cmd_advanced_step") or env.moc_cmd_advanced_step is None:
+        env.moc_cmd_advanced_step = torch.full((env.num_envs,), -1, dtype=torch.int32, device=env.device)
+
+
 
 
 
@@ -132,8 +137,14 @@ def reward_next_commit_success(
 
     # Advance ONLY those envs that committed correctly
     if advance_command and commit_ok.any():
-        env_ids = torch.nonzero(commit_ok, as_tuple=False).squeeze(-1)
-        sample_command_from_to(env, env_ids=env_ids)  # <-- requires commands.py patch below
+        # Advance at most once per env-step (protect against accidental multiple calls).
+        sid = env.episode_length_buf.to(torch.int32) if hasattr(env, "episode_length_buf") else torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
+        can_advance = commit_ok & (env.moc_cmd_advanced_step != sid)
+        if can_advance.any():
+            env_ids = torch.nonzero(can_advance, as_tuple=False).squeeze(-1)
+            sample_command_from_to(env, env_ids=env_ids)
+
+            env.moc_cmd_advanced_step = torch.where(can_advance, sid, env.moc_cmd_advanced_step)
 
         # Reset stable counters for those envs (new subtask)
         zeros_i32 = torch.zeros_like(env.moc_success_count)
@@ -200,11 +211,19 @@ def reward_penalty_disturb_other_cubes(
     """
     ensure_moc_buffers(env)
 
-    if env.moc_cmd_stamp is None or (env.moc_cmd_stamp < 0).all():
+    if env.moc_cmd_stamp is None:
+        env.moc_cmd_stamp = -torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
+
+    # On-demand initialization: if command exists but stamp is unset for some envs, latch baseline now.
+    needs_latch = env.moc_cmd_stamp < 0
+    if needs_latch.any() and hasattr(env, "command_from_to") and env.command_from_to is not None:
+        env_ids = torch.nonzero(needs_latch, as_tuple=False).squeeze(-1)
+        latch_command_state(env, env_ids=env_ids)
+    if (env.moc_cmd_stamp < 0).all():
         return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
 
-    cur_xy = _active_cube_positions_w(env)[:, :, :2]  # (N,3,2)
-    ref_xy = env.moc_cmd_cube_pos_xy0                 # (N,3,2)
+    cur_xy = get_active_cube_pos_w(env)[:, :, :2]  # (N,3,2)
+    ref_xy = env.moc_cmd_cube_pos_xy0              # (N,3,2)
 
     d = cur_xy - ref_xy
     dist = torch.linalg.vector_norm(d, dim=-1)        # (N,3)

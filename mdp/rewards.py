@@ -8,7 +8,7 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 from .terminations import move_success
-from .commands import sample_command_from_to, ensure_command_buffer
+from .commands import sample_command_from_to, ensure_command_buffer, ensure_moc_buffers, _active_cube_positions_w
 
 
 # -------------------------
@@ -183,3 +183,37 @@ def reward_wait_after_success(
     wait = stable & (~fired)
     return -wait.to(torch.float32) * float(lambda_wait)
 
+
+# -------------------------
+# Phase-1 stability shaping
+# -------------------------
+def reward_penalty_disturb_other_cubes(
+    env: "ManagerBasedRLEnv",
+    lambda_disturb: float = 0.25,
+    tol_xy: float = 0.01,
+) -> torch.Tensor:
+    """Penalize moving non-target cubes away from their positions at command assignment.
+
+    Requires buffers created by ensure_moc_buffers() and updated when commands are sampled:
+        - env.target_cube_id: (N,) in {0,1,2}
+        - env.moc_cmd_cube_pos_xy0: (N,3,2) baseline XY positions of active cubes
+    """
+    ensure_moc_buffers(env)
+
+    if env.moc_cmd_stamp is None or (env.moc_cmd_stamp < 0).all():
+        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    cur_xy = _active_cube_positions_w(env)[:, :, :2]  # (N,3,2)
+    ref_xy = env.moc_cmd_cube_pos_xy0                 # (N,3,2)
+
+    d = cur_xy - ref_xy
+    dist = torch.linalg.vector_norm(d, dim=-1)        # (N,3)
+
+    target = torch.clamp(env.target_cube_id, 0, 2)    # (N,)
+    mask = torch.ones_like(dist, dtype=torch.bool)
+    mask.scatter_(1, target.view(-1, 1), False)        # True for non-target cubes
+
+    disturb = torch.clamp(dist - float(tol_xy), min=0.0)
+    penalty = (disturb * mask.to(disturb.dtype)).sum(dim=1)  # (N,)
+
+    return -float(lambda_disturb) * penalty

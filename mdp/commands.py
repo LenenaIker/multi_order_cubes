@@ -10,11 +10,24 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-def _slots_w(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """(4,3) slots in world frame as torch on env.device."""
-    slots = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)
-    assert slots.shape == (4, 3), f"Expected slot_positions shape (4,3), got {slots.shape}"
-    return slots
+def _slots_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    """Slots in world frame.
+
+    Returns:
+        - (N,4,3) if env_ids is None
+        - (M,4,3) if env_ids provided
+    """
+    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
+    assert slots_local.shape == (4, 3), f"Expected slot_positions shape (4,3), got {slots_local.shape}"
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device)
+
+    origins = env.scene.env_origins.index_select(0, env_ids)  # (M,3)
+    return slots_local.unsqueeze(0) + origins.unsqueeze(1)    # (M,4,3)
+
 
 
 CUBE_KEYS_9 = [
@@ -23,29 +36,37 @@ CUBE_KEYS_9 = [
     "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
 ]
 
-def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
+def _active_cube_positions_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
     """
-    Returns (N,3,3) positions for the 3 ACTIVE cubes (one per color), per-env.
-    Requires env.active_cube_indices set by reset event.
+    Active cube positions in world frame.
+
+    Returns:
+        - (N,3,3) if env_ids is None
+        - (M,3,3) if env_ids provided
     """
     assert hasattr(env, "active_cube_indices"), "env.active_cube_indices missing. Call reset event randomize_cubes_on_slots first."
 
-    # (N,9,3)
-    pos9 = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device)
 
-    idx = env.active_cube_indices  # (N,3) values 0..8
-    idx3 = idx.unsqueeze(-1).expand(-1, -1, 3)  # (N,3,3)
+    pos9_all = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    pos9 = pos9_all.index_select(0, env_ids)  # (M,9,3)
 
-    return pos9.gather(1, idx3)
+    idx = env.active_cube_indices.index_select(0, env_ids)  # (M,3)
+    return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (M,3,3)
 
 # Replace old uses:
 # _cube_positions_w(...) -> _active_cube_positions_w(env)
-def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
-    cubes = _active_cube_positions_w(env)[:, :, :2]  # (N,3,2)
-    slots = _slots_w(env)[:, :2].unsqueeze(0)        # (1,4,2)
-    d = cubes.unsqueeze(2) - slots.unsqueeze(1)      # (N,3,4,2)
-    dist2 = (d * d).sum(dim=-1)                      # (N,3,4)
-    return torch.argmin(dist2, dim=2)                # (N,3)
+def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    """Nearest slot index (0..3) for each active cube, per env."""
+    cubes = _active_cube_positions_w(env, env_ids=env_ids)[:, :, :2]  # (M,3,2)
+    slots = _slots_w(env, env_ids=env_ids)[:, :, :2]                  # (M,4,2)
+
+    d = cubes.unsqueeze(2) - slots.unsqueeze(1)   # (M,3,4,2)
+    dist2 = (d * d).sum(dim=-1)                   # (M,3,4)
+    return torch.argmin(dist2, dim=2)             # (M,3)
 
 
 def ensure_command_buffer(env: ManagerBasedRLEnv):
@@ -53,10 +74,20 @@ def ensure_command_buffer(env: ManagerBasedRLEnv):
     if not hasattr(env, "command_from_to") or env.command_from_to is None:
         env.command_from_to = torch.zeros((env.num_envs, 2), dtype=torch.long, device=env.device)
 
+def ensure_moc_buffers(env: ManagerBasedRLEnv):
+    """Auxiliary buffers for Phase-1 correctness/stability."""
+    if not hasattr(env, "target_cube_id") or env.target_cube_id is None:
+        env.target_cube_id = torch.zeros((env.num_envs,), dtype=torch.long, device=env.device)
+    if not hasattr(env, "moc_cmd_cube_pos_xy0") or env.moc_cmd_cube_pos_xy0 is None:
+        env.moc_cmd_cube_pos_xy0 = torch.zeros((env.num_envs, 3, 2), dtype=torch.float32, device=env.device)
+    if not hasattr(env, "moc_cmd_stamp") or env.moc_cmd_stamp is None:
+        env.moc_cmd_stamp = -torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
+
 
 def set_command_from_to(env: ManagerBasedRLEnv, from_slot_1based: int, to_slot_1based: int):
     """Set same command for all envs (useful for debugging)."""
     ensure_command_buffer(env)
+    ensure_moc_buffers(env)
     env.command_from_to[:, 0] = int(from_slot_1based)
     env.command_from_to[:, 1] = int(to_slot_1based)
 
@@ -77,6 +108,7 @@ def sample_command_from_to(
     """
     assert num_slots == 4, "This implementation assumes 4 slots"
     ensure_command_buffer(env)
+    ensure_moc_buffers(env)
 
     # Decide which envs to update
     if env_ids is None:
@@ -115,6 +147,28 @@ def sample_command_from_to(
 
     probs_to = torch.where(deg_to.unsqueeze(1), fallback_to, probs_to)
     to_idx = torch.multinomial(probs_to, num_samples=1, replacement=True).squeeze(1)     # (M,)
+
+
+    # ---- latch target_cube_id for this command (per-env) ----
+    cubes_pos = _active_cube_positions_w(env, env_ids=env_ids)          # (M,3,3)
+    slots_w = _slots_w(env, env_ids=env_ids)                            # (M,4,3)
+
+    match = (nearest == from_idx.unsqueeze(1))                          # (M,3)
+    has_match = match.any(dim=1)                                        # (M,)
+    first_match_id = match.to(torch.int64).argmax(dim=1)                # (M,)
+
+    from_slot_xy = slots_w[torch.arange(M, device=env.device), from_idx, :2]  # (M,2)
+    dxy = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)               # (M,3,2)
+    dist2_from = (dxy * dxy).sum(dim=-1)                                # (M,3)
+    fallback_id = dist2_from.argmin(dim=1)                              # (M,)
+
+    target_id = torch.where(has_match, first_match_id, fallback_id)     # (M,)
+
+    env.target_cube_id[env_ids] = target_id
+    env.moc_cmd_cube_pos_xy0[env_ids] = cubes_pos[:, :, :2]
+    if hasattr(env, "episode_length_buf"):
+        env.moc_cmd_stamp[env_ids] = env.episode_length_buf[env_ids]
+
 
     # Write ONLY in env_ids
     env.command_from_to[env_ids, 0] = from_idx + 1  # 1..4

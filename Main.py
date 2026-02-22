@@ -21,9 +21,11 @@ simulation_app = app_launcher.app
 # -----------------
 import torch  # noqa: E402
 from isaaclab.envs import ManagerBasedRLEnv  # noqa: E402
-from multi_order_cubes.config.ur10_gripper import (  # noqa: E402
-    UR10LongSuctionMultiOrderCubesEnvCfg,
-)
+from multi_order_cubes.config.ur10_gripper import UR10LongSuctionMultiOrderCubesEnvCfg
+
+from multi_order_cubes.mdp.commands import set_command_from_to, ensure_moc_buffers
+from multi_order_cubes.mdp.terminations import move_success
+from multi_order_cubes.mdp.rewards import reward_penalty_disturb_other_cubes
 
 
 def main():
@@ -33,18 +35,30 @@ def main():
 
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
-    count = 0
-    while simulation_app.is_running():
-        with torch.inference_mode():
-            if count % 1000 == 0:
-                env.reset()
-                print("[INFO] Reset")
+    obs, info = env.reset()
 
-            # Safe actions (all zeros)
-            actions = torch.zeros_like(env.action_manager.action)
-            
-            obs, rew, terminated, truncated, info = env.step(actions)
-            count += 1
+    # fuerza comando fijo
+    set_command_from_to(env, 1, 2)
+    ensure_moc_buffers(env)
+
+    for t in range(1000):
+        # acciones aleatorias (ajusta a tu action_space)
+        actions = torch.randn((env.num_envs, env.action_manager.total_action_dim), device=env.device) * 0.1
+
+        obs, rew, terminated, truncated, info = env.step(actions)
+
+        if t % 10 == 0:
+            ok = move_success(env)
+            disturb = reward_penalty_disturb_other_cubes(env)
+            print(
+                f"t={t} cmd={env.command_from_to[:].tolist()} "
+                f"ok={ok[:].tolist()} disturb={disturb[:].tolist()} rew={rew[:].tolist()}"
+            )
+
+        if bool(terminated.any() or truncated.any()):
+            obs, info = env.reset()
+            set_command_from_to(env, 1, 2)
+            ensure_moc_buffers(env)
 
     env.close()
 

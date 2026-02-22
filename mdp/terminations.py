@@ -11,9 +11,15 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-def _slots_w(env: ManagerBasedRLEnv) -> torch.Tensor:
-    slots = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)
-    return slots
+def _slots_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device)
+    origins = env.scene.env_origins.index_select(0, env_ids)  # (M,3)
+    return slots_local.unsqueeze(0) + origins.unsqueeze(1)    # (M,4,3)
+
 
 CUBE_KEYS_9 = [
     "cube_light_s", "cube_light_m", "cube_light_l",
@@ -21,23 +27,24 @@ CUBE_KEYS_9 = [
     "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
 ]
 
-def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
+def _active_cube_positions_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        # Default: pick the "medium" instance for each color => indices [1, 4, 7]
-        env.active_cube_indices = torch.zeros((env.num_envs, 3), dtype=torch.long, device=env.device)
-        env.active_cube_indices[:, 0] = 1  # light_m
-        env.active_cube_indices[:, 1] = 4  # flat_m
-        env.active_cube_indices[:, 2] = 7  # dark_m
-    pos9 = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
-    idx = env.active_cube_indices  # (N,3)
-    return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (N,3,3)
+        raise RuntimeError("env.active_cube_indices missing. Ensure reset event randomize_cubes_on_slots runs before termination.")
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        env_ids = env_ids.to(device=env.device)
+    pos9_all = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    pos9 = pos9_all.index_select(0, env_ids)  # (M,9,3)
+    idx = env.active_cube_indices.index_select(0, env_ids)  # (M,3)
+    return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (M,3,3)
 
-def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv) -> torch.Tensor:
-    cubes = _active_cube_positions_w(env)[:, :, :2]  # (N,3,2)
-    slots = _slots_w(env)[:, :2].unsqueeze(0)        # (1,4,2)
+def _nearest_slot_for_each_cube_xy(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
+    cubes = _active_cube_positions_w(env, env_ids=env_ids)[:, :, :2]  # (M,3,2)
+    slots = _slots_w(env, env_ids=env_ids)[:, :, :2]                  # (M,4,2)
     d = cubes.unsqueeze(2) - slots.unsqueeze(1)
     dist2 = (d * d).sum(dim=-1)
-    return torch.argmin(dist2, dim=2)  # (N,3)
+    return torch.argmin(dist2, dim=2)  # (M,3)
 
 def _is_gripper_open(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
     # -------------------------
@@ -77,43 +84,50 @@ def _is_gripper_open(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg = SceneEn
     return ok1 & ok2
 
 
-def move_success(
-    env: ManagerBasedRLEnv,
-    xy_tol: float = 0.03,
-    require_gripper_open: bool = True,
-) -> torch.Tensor:
-    """
-    Success if the cube that STARTED at 'from' is now at 'to' (nearest-slot wise + XY tolerance),
-    and (optionally) the gripper is open.
-    """
-    assert hasattr(env, "command_from_to"), "env.command_from_to not found. Add commands manager or set it manually."
-    cmd = env.command_from_to  # (N,2) values 1..4
-    from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)
-    to_idx = torch.clamp(cmd[:, 1] - 1, 0, 3)
+def move_success(env: ManagerBasedRLEnv, tol_xy: float = 0.02, tol_z: float = 0.05) -> torch.Tensor:
+    """Success if the *target cube* (latched if available) is at to_slot.
 
-    nearest = _nearest_slot_for_each_cube_xy(env)  # (N,3)
+    Returns:
+        (N,) bool tensor
+    """
+    # Command is stored 1..4
+    if not hasattr(env, "command_from_to") or env.command_from_to is None:
+        return torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
+
+    cmd = env.command_from_to.to(device=env.device)
+    from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)  # (N,)
+    to_idx = torch.clamp(cmd[:, 1] - 1, 0, 3)    # (N,)
+
     cubes_pos = _active_cube_positions_w(env)  # (N,3,3)
-    slots = _slots_w(env)  # (4,3)
+    slots = _slots_w(env)                      # (N,4,3)
 
-    # Identify target cube as the cube whose nearest slot == from_idx.
-    # If none matches (degenerate), pick the cube closest to the 'from' slot in XY.
-    match = (nearest == from_idx.unsqueeze(1))  # (N,3)
-    has_match = match.any(dim=1)  # (N,)
-    first_match_id = match.to(torch.int64).argmax(dim=1)  # (N,)
+    # --- Determine target_cube_id ---
+    if hasattr(env, "target_cube_id") and env.target_cube_id is not None:
+        target_cube_id = torch.clamp(env.target_cube_id.to(device=env.device), 0, 2)  # (N,)
+    else:
+        # Infer target cube as the one currently assigned to from_slot (nearest in XY).
+        nearest = _nearest_slot_for_each_cube_xy(env)  # (N,3)
 
-    from_slot_xy = slots[from_idx, :2]  # (N,2)
-    d = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)  # (N,3,2)
-    dist2 = (d * d).sum(dim=-1)  # (N,3)
-    fallback_id = dist2.argmin(dim=1)  # (N,)
+        match = (nearest == from_idx.unsqueeze(1))     # (N,3)
+        has_match = match.any(dim=1)                   # (N,)
+        first_match_id = match.to(torch.int64).argmax(dim=1)
 
-    target_cube_id = torch.where(has_match, first_match_id, fallback_id)
+        from_slot_xy = slots[torch.arange(env.num_envs, device=env.device), from_idx, :2]  # (N,2)
+        dxy = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)                                # (N,3,2)
+        dist2 = (dxy * dxy).sum(dim=-1)                                                      # (N,3)
+        fallback_id = dist2.argmin(dim=1)                                                    # (N,)
 
-    # distance of target cube to 'to' slot
-    target_pos = cubes_pos[torch.arange(env.num_envs, device=env.device), target_cube_id, :]
-    target_slot_pos = slots[to_idx]  # (N,3) via fancy indexing
-    xy_dist = torch.linalg.vector_norm(target_pos[:, :2] - target_slot_pos[:, :2], dim=1)
+        target_cube_id = torch.where(has_match, first_match_id, fallback_id)                 # (N,)
 
-    ok = xy_dist < xy_tol
-    if require_gripper_open:
-        ok = ok & _is_gripper_open(env)
-    return ok
+    # --- Check target cube near to_slot ---
+    target_pos = cubes_pos[torch.arange(env.num_envs, device=env.device), target_cube_id, :]  # (N,3)
+    target_slot_pos = slots[torch.arange(env.num_envs, device=env.device), to_idx, :]         # (N,3)
+
+    dx = target_pos[:, 0] - target_slot_pos[:, 0]
+    dy = target_pos[:, 1] - target_slot_pos[:, 1]
+    dz = target_pos[:, 2] - target_slot_pos[:, 2]
+
+    ok_xy = (dx * dx + dy * dy) <= (float(tol_xy) ** 2)
+    ok_z = torch.abs(dz) <= float(tol_z)
+
+    return ok_xy & ok_z

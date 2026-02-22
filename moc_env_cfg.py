@@ -138,6 +138,15 @@ class RewardsCfg:
             lambda_wait=0.05,        # small negative while success is stable but NEXT not fired
         ),
     )
+    # Penalize disturbing non-target cubes (reduces pushing/bulldozing behavior)
+    disturb_other_cubes = RewTerm(
+        func=mdp.reward_penalty_disturb_other_cubes,
+        weight=1.0,
+        params=dict(
+            lambda_disturb=0.25,
+            tol_xy=0.01,
+        ),
+    )
 
 @configclass
 class EventsCfg:

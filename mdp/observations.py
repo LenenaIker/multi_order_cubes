@@ -20,11 +20,10 @@ def slot_positions_in_base_frame(env, robot_cfg=SceneEntityCfg("robot")) -> torc
     root_pos_w = robot.data.root_pos_w
     root_quat_w = robot.data.root_quat_w
 
-    # OJO: si slot_positions realmente es local-env, aquí también deberías sumar env_origins
-    slots = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
-
-    # (N,4,3) como view (sin materializar N copias)
-    slots_w = slots.unsqueeze(0).expand(env.num_envs, -1, -1)
+    # slot_positions are local to each env; convert to world by adding env_origins
+    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
+    origins = env.scene.env_origins  # (N,3)
+    slots_w = slots_local.unsqueeze(0) + origins.unsqueeze(1)  # (N,4,3)
 
     # identity quat (1,4) -> (N,4,4) como view
     ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=env.device, dtype=torch.float32)
@@ -70,7 +69,8 @@ def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
 
 def cubes_slot_occupancy_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> torch.Tensor:
     cubes_pos_w = _active_cube_positions_w(env)  # (N,3,3)
-    slots_w = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device).unsqueeze(0)  # (1,4,3)
+    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
+    slots_w = slots_local.unsqueeze(0) + env.scene.env_origins.unsqueeze(1)  # (N,4,3)
 
     d = cubes_pos_w[:, :, :2].unsqueeze(2) - slots_w[:, None, :, :2]  # (N,3,4,2)
     dist2 = (d * d).sum(dim=-1)                                       # (N,3,4)
@@ -169,12 +169,10 @@ def stable_success_hint(env: "ManagerBasedRLEnv") -> torch.Tensor:
 
 def policy_obs(
     env: ManagerBasedRLEnv,
-    cube_1_cfg: SceneEntityCfg = SceneEntityCfg("cube_1"),
-    cube_2_cfg: SceneEntityCfg = SceneEntityCfg("cube_2"),
-    cube_3_cfg: SceneEntityCfg = SceneEntityCfg("cube_3"),
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
+
     """
     Observation vector (recommended):
 
@@ -188,10 +186,10 @@ def policy_obs(
     Total: 52 (+1 if suction, +2 if parallel)
     """
     obs = [
-        cubes_poses_in_base_frame(env, cube_1_cfg, cube_2_cfg, cube_3_cfg, robot_cfg),
+        cubes_poses_in_base_frame(env, robot_cfg=robot_cfg),
         ee_pose_in_base_frame(env, ee_frame_cfg, robot_cfg, return_key=None),
         slot_positions_in_base_frame(env, robot_cfg),
-        cubes_slot_occupancy_onehot(env, cube_1_cfg, cube_2_cfg, cube_3_cfg, num_slots=4),
+        cubes_slot_occupancy_onehot(env, num_slots=4),
         command_from_to_onehot(env, num_slots=4),
         gripper_state(env, robot_cfg),
         stable_success_hint(env)

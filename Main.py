@@ -26,6 +26,11 @@ from multi_order_cubes.config.ur10_gripper import UR10LongSuctionMultiOrderCubes
 from multi_order_cubes.mdp.commands import set_command_from_to, ensure_moc_buffers
 from multi_order_cubes.mdp.terminations import move_success
 from multi_order_cubes.mdp.rewards import reward_penalty_disturb_other_cubes
+from multi_order_cubes.smoke_tests import (
+    run_random_policy_smoke,
+    run_adversarial_next_spam_smoke,
+    run_disturb_push_smoke
+)
 
 
 def main():
@@ -63,6 +68,36 @@ def main():
     env.close()
 
 
+def smoke_test():
+    env_cfg = UR10LongSuctionMultiOrderCubesEnvCfg()
+    env_cfg.scene.num_envs = args_cli.num_envs
+    env_cfg.sim.device = args_cli.device
+
+    env = ManagerBasedRLEnv(cfg=env_cfg)
+
+
+    # 1) random policy smoke
+    run_random_policy_smoke(env, steps=4000, metrics_every=500)
+
+    # 2) adversarial: NEXT spam
+    run_adversarial_next_spam_smoke(env, steps=2000, metrics_every=500)
+
+    # Si quieres volver a tu loop normal, lo pones después.
+    env.close()
+
+def diagnostic():
+    env_cfg = UR10LongSuctionMultiOrderCubesEnvCfg()
+    env_cfg.scene.num_envs = args_cli.num_envs
+    env_cfg.sim.device = args_cli.device
+
+    env = ManagerBasedRLEnv(cfg=env_cfg)
+
+    run_disturb_push_smoke(env, steps=2000, metrics_every=500)
+
+    env.close()
+
+
+
 if __name__ == "__main__":
-    main()
+    diagnostic()
     simulation_app.close()

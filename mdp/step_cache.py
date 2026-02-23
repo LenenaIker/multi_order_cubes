@@ -1,4 +1,3 @@
-# multi_order_cubes/mdp/step_cache.py
 from __future__ import annotations
 
 import torch

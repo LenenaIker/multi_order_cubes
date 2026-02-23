@@ -130,6 +130,7 @@ def reward_next_commit_success(
     next_evt = fired & can_fire
 
     commit_ok = next_evt & stable  # (N,)
+    env.moc_commit_ok = commit_ok.to(torch.bool)
     rew = commit_ok.to(torch.float32) * float(R_commit)
 
     # Apply cooldown on any NEXT attempt (ok or fail)

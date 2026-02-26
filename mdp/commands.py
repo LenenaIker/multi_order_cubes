@@ -6,6 +6,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.assets import RigidObject
 from typing import TYPE_CHECKING
 
+from .terminations import move_success
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -184,16 +186,36 @@ def sample_command_from_to(
 
     from_idx = torch.multinomial(probs_from, num_samples=1, replacement=True).squeeze(1)  # (M,)
 
-    # ---- sample TO among empty ----
-    probs_to = empty.to(torch.float32)                         # (M,4)
-    sum_to = probs_to.sum(dim=1, keepdim=True)                 # (M,1)
-    deg_to = (sum_to.squeeze(1) == 0)
 
+    # ---- choose TO as an actually empty slot (deterministic when unique) ----
+    empty_count = empty.sum(dim=1)  # (M,) expected == 1 with 3 cubes / 4 slots
+
+    # Case A: exactly one empty -> pick it deterministically
+    to_idx_unique = empty.to(torch.int64).argmax(dim=1)  # (M,)
+
+    # Case B: multiple empties (degenerate occupancy) -> pick uniformly among empties
+    # Build probs over empties; if none empty -> fallback to any slot != from
+    # ---- choose TO: prefer the unique empty slot (O(1), no loops) ----
+    empty_count = empty.sum(dim=1)  # (M,) expected == 1 with 3 cubes / 4 slots
+
+    # Case A: exactly one empty -> pick it deterministically
+    to_idx_unique = empty.to(torch.int64).argmax(dim=1)  # (M,)
+
+    # Case B: multiple empties (degenerate occupancy) -> pick among empties but never equal to from
+    probs_to = empty.to(torch.float32)  # (M,4)
+    probs_to.scatter_(1, from_idx.view(-1, 1), 0.0)  # forbid to==from
+
+    # Case C: if no valid empty remains (all mass removed), fallback to any slot != from
     fallback_to = torch.ones_like(probs_to)
-    fallback_to.scatter_(1, from_idx.view(-1, 1), 0.0)         # all slots except from
+    fallback_to.scatter_(1, from_idx.view(-1, 1), 0.0)
 
-    probs_to = torch.where(deg_to.unsqueeze(1), fallback_to, probs_to)
-    to_idx = torch.multinomial(probs_to, num_samples=1, replacement=True).squeeze(1)     # (M,)
+    valid_to_count = probs_to.sum(dim=1)  # (M,)
+    probs_to = torch.where(valid_to_count.unsqueeze(1) > 0, probs_to, fallback_to)
+
+    to_idx_multi = torch.multinomial(probs_to, num_samples=1, replacement=True).squeeze(1)
+    
+    # Deterministic when we have the unique empty slot, otherwise sampled
+    to_idx = torch.where(empty_count == 1, to_idx_unique, to_idx_multi)
 
 
     # ---- latch target_cube_id for this command (per-env) ----
@@ -222,3 +244,44 @@ def sample_command_from_to(
     env.command_from_to[env_ids, 1] = to_idx + 1
 
     return env.command_from_to
+
+
+@torch.no_grad()
+def resample_commands_until_not_success(
+    env,
+    max_tries: int = 20,
+    tol_xy: float = 0.02,
+    tol_z: float = 0.05,
+    clear_tol_xy: float = 0.08,
+) -> None:
+    """Resample command_from_to on reset so that move_success is not already True.
+
+    Uses require_settled=False to avoid dependence on velocity thresholds.
+    """
+    # Nota: asumimos que active_cube_indices ya existe (event randomize_cubes ejecutado).
+
+    for _ in range(max_tries):
+        # sample_command_from_to ya debe rellenar env.command_from_to y latchear target/baseline
+        sample_command_from_to(env)  # <-- esta función YA existe en commands.py
+
+        # si tu sample_command_from_to NO hace latch, descomenta:
+        # latch_command_state(env)
+
+        ms = move_success(
+            env,
+            tol_xy=tol_xy,
+            tol_z=tol_z,
+            require_to_clear=True,
+            clear_tol_xy=clear_tol_xy,
+            require_settled=False,
+        )
+
+        if not bool(ms.any().item()):
+            return
+
+    # Si llegamos aquí, seguimos teniendo algunos success; forzamos "from!=to" y salimos.
+    # (Dejar claro en log para depuración.)
+    print(
+        f"[WARN] resample_commands_until_not_success reached max_tries={max_tries}; "
+        f"some envs may start in success."
+    )

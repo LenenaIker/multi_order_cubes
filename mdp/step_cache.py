@@ -18,21 +18,66 @@ def _ensure_cache(env: "ManagerBasedRLEnv") -> None:
     """Initialize cache containers lazily."""
     if not hasattr(env, "_moc_cache") or env._moc_cache is None:
         env._moc_cache = {}
-    if not hasattr(env, "_moc_cache_step_id") or env._moc_cache_step_id is None:
-        env._moc_cache_step_id = -1
 
-    # If step_id doesn't exist (e.g., if NextFlagAction not used), fall back to -1.
+    # Token used to decide whether cache is still valid for the *current* sim step.
+    if not hasattr(env, "_moc_cache_token") or env._moc_cache_token is None:
+        env._moc_cache_token = -1
+
+    # Keep compatibility: some code increments this (NextFlagAction).
     if not hasattr(env, "_moc_step_id") or env._moc_step_id is None:
         env._moc_step_id = -1
 
+        # Monotonic reset id (used to invalidate cache across resets even without env.step()).
+    if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None:
+        env._moc_reset_id = 0
+
+
+def _get_step_token(env: "ManagerBasedRLEnv") -> int:
+    """Best-effort token that changes every sim step.
+
+    Priority:
+      1) env._moc_step_id if user increments it reliably.
+      2) Fallback to a reduced signature of episode_length_buf (+ reset_buf if present).
+
+    This avoids stale caches even when NextFlagAction is not executed.
+    """
+    # Preferred: explicit monotonic step id
+    try:
+        sid = int(env._moc_step_id)
+        if sid >= 0:
+            return sid
+    except Exception:
+        pass
+
+    # Fallback: use reductions over per-env step buffers (cheap and usually step-unique).
+    if not hasattr(env, "episode_length_buf") or env.episode_length_buf is None:
+        # Worst case fallback: always invalidate (token changes every call).
+        # But we still return something deterministic-ish.
+        return 0
+
+    el = env.episode_length_buf
+    s = int(el.sum().item())
+    mx = int(el.max().item())
+    mn = int(el.min().item())
+
+    rb = 0
+    if hasattr(env, "reset_buf") and env.reset_buf is not None:
+        rb = int(env.reset_buf.sum().item())
+
+    rid = 0
+    if hasattr(env, "_moc_reset_id") and env._moc_reset_id is not None:
+        rid = int(env._moc_reset_id)
+
+    base = (s << 32) ^ (mx << 16) ^ (mn << 8) ^ rb
+    return (rid << 48) ^ base
 
 def _invalidate_if_needed(env: "ManagerBasedRLEnv") -> None:
     """Invalidate cache if env step changed."""
     _ensure_cache(env)
-    sid = int(env._moc_step_id)
-    if env._moc_cache_step_id != sid:
+    token = _get_step_token(env)
+    if env._moc_cache_token != token:
         env._moc_cache.clear()
-        env._moc_cache_step_id = sid
+        env._moc_cache_token = token
 
 
 def get_slots_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
@@ -81,8 +126,14 @@ def get_active_cube_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     if key in env._moc_cache:
         return env._moc_cache[key]
 
+    # During env initialization, ObservationManager calls observation functions to infer shapes
+    # before reset events run. In that phase, active_cube_indices may not exist yet.
+    # Return a correctly-shaped zero tensor instead of crashing.
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        raise RuntimeError("env.active_cube_indices missing. Ensure reset event randomize_cubes_on_slots ran.")
+        N = int(getattr(env, "num_envs", 1))
+        device = getattr(env, "device", "cpu")
+        return torch.zeros((N, 3, 3), dtype=torch.float32, device=device)
+    
 
     pos9 = get_cube_pos9_w(env)  # (N,9,3)
     idx = env.active_cube_indices  # (N,3)
@@ -99,8 +150,15 @@ def get_active_cube_quat_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     if key in env._moc_cache:
         return env._moc_cache[key]
 
+    # During env initialization, ObservationManager calls observation functions to infer shapes
+    # before reset events run. In that phase, active_cube_indices may not exist yet.
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        raise RuntimeError("env.active_cube_indices missing. Ensure reset event randomize_cubes_on_slots ran.")
+        N = int(getattr(env, "num_envs", 1))
+        device = getattr(env, "device", "cpu")
+        # identity quaternion (w,x,y,z) convention in IsaacLab is typically (w, x, y, z)
+        q = torch.zeros((N, 3, 4), dtype=torch.float32, device=device)
+        q[..., 0] = 1.0
+        return q
 
     quat9 = get_cube_quat9_w(env)  # (N,9,4)
     idx = env.active_cube_indices  # (N,3)

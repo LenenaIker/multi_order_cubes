@@ -41,22 +41,25 @@ def slot_positions_in_base_frame(env, robot_cfg=SceneEntityCfg("robot")) -> torc
     return slots_pos_base.view(env.num_envs, 4, 3).reshape(env.num_envs, 12)
 
 
-def command_from_to_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> torch.Tensor:
-    """
-    One-hot encoding of the task command.
+def command_from_to_onehot(env, num_slots: int = 4):
+    """One-hot encoding of (from_slot, to_slot). Safe during env init before reset buffers exist."""
+    N = int(getattr(env, "num_envs", 1))
+    device = getattr(env, "device", "cpu")
 
-    Requires:
-        env.command_from_to: LongTensor (N,2) with values in 1..4 (from,to)
-    Output:
-        (N, 8) = onehot(from,4) + onehot(to,4)
-    """
-    cmd = env.command_from_to  # (N,2) in 1..4
-    cmd0 = torch.clamp(cmd[:, 0] - 1, 0, num_slots - 1)  # to 0..3
-    cmd1 = torch.clamp(cmd[:, 1] - 1, 0, num_slots - 1)
+    if not hasattr(env, "command_from_to") or env.command_from_to is None:
+        # shape: (N, 2*num_slots) -> [from_onehot | to_onehot]
+        return torch.zeros((N, 2 * int(num_slots)), dtype=torch.float32, device=device)
 
-    from_oh = torch.nn.functional.one_hot(cmd0, num_classes=num_slots).to(torch.float32)
-    to_oh = torch.nn.functional.one_hot(cmd1, num_classes=num_slots).to(torch.float32)
-    return torch.cat([from_oh, to_oh], dim=1)  # (N,8)
+    cmd = env.command_from_to  # (N,2) in 1..num_slots
+    from_idx = torch.clamp(cmd[:, 0] - 1, 0, num_slots - 1)
+    to_idx = torch.clamp(cmd[:, 1] - 1, 0, num_slots - 1)
+
+    from_oh = torch.zeros((N, num_slots), dtype=torch.float32, device=device)
+    to_oh = torch.zeros((N, num_slots), dtype=torch.float32, device=device)
+    from_oh.scatter_(1, from_idx.view(-1, 1), 1.0)
+    to_oh.scatter_(1, to_idx.view(-1, 1), 1.0)
+
+    return torch.cat([from_oh, to_oh], dim=-1)
 
 CUBE_KEYS_9 = [
     "cube_light_s", "cube_light_m", "cube_light_l",

@@ -9,6 +9,7 @@ import torch
 
 from .commands import sample_command_from_to
 
+
 # ---- cube registry (order matters) ----
 CUBE_KEYS_9 = [
     "cube_light_s", "cube_light_m", "cube_light_l",
@@ -22,10 +23,13 @@ _COLOR_BASE = torch.tensor([0, 3, 6], dtype=torch.long)
 
 
 def sample_from_to_on_reset(env: "ManagerBasedRLEnv", env_ids=None):
-    if env_ids is None:
-        sample_command_from_to(env)
-    else:
-        sample_command_from_to(env, env_ids=env_ids)
+    # Increment reset id to invalidate step_cache across resets even if no env.step() happens.
+    if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None:
+        env._moc_reset_id = 0
+    env._moc_reset_id += 1
+
+    # One-shot sampling (no retries). Command validity is by construction.
+    sample_command_from_to(env, env_ids=env_ids)
 
 
 def _maybe_set_visibility(cube, visible: bool, env_ids: torch.Tensor):

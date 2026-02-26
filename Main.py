@@ -29,7 +29,12 @@ from multi_order_cubes.mdp.rewards import reward_penalty_disturb_other_cubes
 from multi_order_cubes.smoke_tests import (
     run_random_policy_smoke,
     run_adversarial_next_spam_smoke,
-    run_disturb_push_smoke
+    run_disturb_push_smoke,
+    run_no_false_positive_adjacent_slots_smoke,
+    run_require_settled_no_crash_smoke,
+    run_step_cache_invalidation_without_next_smoke,
+    run_move_success_reset_diagnostics,
+    run_no_start_in_success_smoke
 )
 
 
@@ -68,36 +73,34 @@ def main():
     env.close()
 
 
-def smoke_test():
+def diagnostic_all_smoke():
     env_cfg = UR10LongSuctionMultiOrderCubesEnvCfg()
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.sim.device = args_cli.device
 
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
+    try:
+        # ----------------------------
+        # FAST / STRUCTURAL SMOKES FIRST
+        # ----------------------------
+        run_no_start_in_success_smoke(env)                      # your key regression
+        run_step_cache_invalidation_without_next_smoke(env)     # cache correctness without NEXT
+        run_require_settled_no_crash_smoke(env)                 # settled gating must not crash
+        run_no_false_positive_adjacent_slots_smoke(env)         # tol_xy / adjacency false positives
+        run_move_success_reset_diagnostics(env)                 # prints reset diagnostics
 
-    # 1) random policy smoke
-    run_random_policy_smoke(env, steps=4000, metrics_every=500)
+        # ----------------------------
+        # BEHAVIORAL / LONGER SMOKES
+        # ----------------------------
+        run_random_policy_smoke(env)                            # long random rollouts + metrics
+        run_adversarial_next_spam_smoke(env)                    # spam NEXT
+        run_disturb_push_smoke(env)                             # induce contact/disturb
 
-    # 2) adversarial: NEXT spam
-    run_adversarial_next_spam_smoke(env, steps=2000, metrics_every=500)
-
-    # Si quieres volver a tu loop normal, lo pones después.
-    env.close()
-
-def diagnostic():
-    env_cfg = UR10LongSuctionMultiOrderCubesEnvCfg()
-    env_cfg.scene.num_envs = args_cli.num_envs
-    env_cfg.sim.device = args_cli.device
-
-    env = ManagerBasedRLEnv(cfg=env_cfg)
-
-    run_disturb_push_smoke(env, steps=2000, metrics_every=500)
-
-    env.close()
-
+    finally:
+        env.close()
 
 
 if __name__ == "__main__":
-    diagnostic()
+    diagnostic_all_smoke()
     simulation_app.close()

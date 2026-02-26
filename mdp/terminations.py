@@ -7,6 +7,8 @@ from isaaclab.assets import RigidObject, Articulation
 from isaaclab.sensors import FrameTransformer
 from typing import TYPE_CHECKING
 
+import re
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
@@ -14,8 +16,92 @@ from .step_cache import (
     get_slots_w,
     get_active_cube_pos_w,
     get_nearest_slot_for_active_cubes_xy,
+    CUBE_KEYS_9
 )
 
+
+def time_out(env) -> torch.Tensor:
+    """Time-limit truncation. Returns per-env bool tensor."""
+
+    if not hasattr(env, "episode_length_buf"):
+        raise AttributeError("env.episode_length_buf not found; required for time_out termination.")
+    if not hasattr(env, "max_episode_length"):
+        raise AttributeError("env.max_episode_length not found; required for time_out termination.")
+
+    # Truncate on last step
+    return env.episode_length_buf >= (int(env.max_episode_length) - 1)
+
+def cube_fell_off_table(
+    env: "ManagerBasedRLEnv",
+    z_margin_below_slots: float = 0.15,
+    xy_margin: float = 0.35,
+) -> torch.Tensor:
+    """
+    Falla si cualquier cubo activo se ha caído de la mesa o está claramente fuera de la zona útil.
+
+    - Usa slots como referencia (robusto a offsets).
+    - Criterios:
+      * z < (min_slot_z - z_margin_below_slots)
+      * x o y fuera del bounding box de slots ± xy_margin
+    """
+    cubes_pos = get_active_cube_pos_w(env)  # (N,3,3)
+    slots = get_slots_w(env)               # (N,4,3)
+
+    # Umbral Z: debajo de la superficie de slots (aprox mesa)
+    min_slot_z = slots[:, :, 2].min(dim=1).values  # (N,)
+    z_thresh = min_slot_z - float(z_margin_below_slots)
+
+    z_bad = (cubes_pos[:, :, 2] < z_thresh.unsqueeze(1)).any(dim=1)  # (N,)
+
+    # Bounding box XY de slots
+    min_xy = slots[:, :, :2].min(dim=1).values  # (N,2)
+    max_xy = slots[:, :, :2].max(dim=1).values  # (N,2)
+
+    min_xy = min_xy - float(xy_margin)
+    max_xy = max_xy + float(xy_margin)
+
+    x = cubes_pos[:, :, 0]
+    y = cubes_pos[:, :, 1]
+
+    x_bad = ((x < min_xy[:, 0].unsqueeze(1)) | (x > max_xy[:, 0].unsqueeze(1))).any(dim=1)
+    y_bad = ((y < min_xy[:, 1].unsqueeze(1)) | (y > max_xy[:, 1].unsqueeze(1))).any(dim=1)
+
+    xy_bad = x_bad | y_bad
+
+    return z_bad | xy_bad
+
+
+def ee_below_table(
+    env: "ManagerBasedRLEnv",
+    table_z: float = 0.0199,
+    z_margin_below_slots: float = 0.002,
+    body_name_regex_tip: str = r"(tool|ee|tcp|suction)",
+) -> torch.Tensor:
+    try:
+        ee_frame = env.scene["ee_frame"]
+        tip_pos = ee_frame.data.target_pos_w[:, 0, :3]
+    except KeyError:
+        robot = env.scene["robot"]
+        zeros = torch.zeros((env.num_envs, 3), dtype=torch.float32, device=env.device)
+
+        cache_attr = "_moc_tip_body_id_term"
+        body_id = getattr(env, cache_attr, None)
+        if body_id is None:
+            names = list(robot.data.body_names)
+            pat = re.compile(body_name_regex_tip)
+            matches = [i for i, n in enumerate(names) if pat.search(n)]
+            setattr(env, cache_attr, int(matches[0]) if matches else -1)
+            body_id = getattr(env, cache_attr)
+
+        if int(body_id) < 0:
+            return torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
+
+        tip_pos = robot.data.body_pos_w[:, int(body_id), :3]
+        if tip_pos is None:
+            tip_pos = zeros
+
+    z_thresh = float(table_z) - float(z_margin_below_slots)
+    return tip_pos[:, 2] < z_thresh
 
 
 def _active_cube_lin_vel_w(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> torch.Tensor:
@@ -134,7 +220,7 @@ def move_success(
     dy = target_pos[:, 1] - target_slot_pos[:, 1]
     dz = target_pos[:, 2] - target_slot_pos[:, 2]
 
-    ok_xy = (dx * dx + dy * dy) <= (float(tol_xy) * 2)
+    ok_xy = (dx * dx + dy * dy) <= (float(tol_xy) ** 2)
     ok_z = torch.abs(dz) <= float(tol_z)
 
     ok = ok_xy & ok_z

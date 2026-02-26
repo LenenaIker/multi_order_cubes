@@ -85,19 +85,65 @@ class ObservationsCfg:
             self.enable_corruption = False
             self.concatenate_terms = False
 
+    policy: PolicyCfg = PolicyCfg()
+
+
 
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
-    pass
-    # time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    
+    time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
-    # IMPORTANT: remove success termination (no auto-termination on success)
-    # success = DoneTerm(func=mdp.move_success)
+    cube_fell_off_table = DoneTerm(
+        func=mdp.cube_fell_off_table,
+        params=dict(
+            z_margin_below_slots=0.15,
+            xy_margin=0.35,
+        ),
+    )
+
+    ee_below_table = DoneTerm(
+        func=mdp.ee_below_table,
+        params=dict(
+            table_z=0.0199,
+            z_margin_below_slots=0.002,
+            body_name_regex_tip=r"(tool|ee|tcp|suction)",
+        )
+    )
+
 
 
 @configclass
 class RewardsCfg:
+    # Dense shaping: move EE towards the target cube
+    ee_to_target_xy = RewTerm(
+        func=mdp.reward_shaping_ee_to_target_xy,
+        weight=1.0,
+        params=dict(
+            sigma_xy=0.15,
+            scale=1.0,
+        ),
+    )
+    
+    # Dense shaping 3D: EE towards a pregrasp point above target cube
+    ee_to_target_pregrasp = RewTerm(
+        func=mdp.reward_shaping_ee_to_target_pregrasp,
+        weight=0.5,  # pequeño, no debe dominar
+        params=dict(
+            sigma=0.20,
+            scale=1.0,
+            z_offset=0.08,
+        ),
+    )
+
+    # Dense shaping: move target cube towards the commanded to_slot
+    target_to_to_slot_xy = RewTerm(
+        func=mdp.reward_shaping_target_to_to_slot_xy_gated_by_suction,
+        weight=2.0,
+        params=dict(sigma=0.20, scale=1.0),
+    )
+
     # Penalize disturbing non-target cubes (reduces pushing/bulldozing behavior)
     # Keep this BEFORE next_commit_success so its baseline uses the *current* command.
     disturb_other_cubes = RewTerm(
@@ -131,6 +177,51 @@ class RewardsCfg:
         ),
     )
 
+    # 3D pregrasp shaping (tip-centric)
+    ee_to_target_pregrasp_3d = RewTerm(
+        func=mdp.reward_shaping_ee_to_target_pregrasp_3d,
+        weight=1.0,
+        params=dict(
+            sigma=0.20,
+            scale=1.0,
+            z_offset=0.08,
+        ),
+    )
+
+    # Reward using suction when close to target (tool usage)
+    suction_near_target = RewTerm(
+        func=mdp.reward_suction_near_target,
+        weight=1.0,
+        params=dict(
+            sigma=0.08,
+            scale_proximity=3.0,
+            scale_bonus_if_suction_on=4.0,
+            body_name_regex_tip=r"(tool|ee|tcp|suction)",
+        ),
+    )
+    
+    # Penalize using elbow to move cubes
+    elbow_near_cubes_penalty = RewTerm(
+        func=mdp.reward_penalize_elbow_near_cubes,
+        weight=1.0,
+        params=dict(
+            safe_in_slot_pitches=0.55,   # ajusta 0.35–0.70 según “2–3 cubos”
+            penalty_scale=12.0,
+            body_name_regex=r"(elbow|forearm)",
+        ),
+    )
+
+    # Reward lifting target once suction is active
+    lift_target_when_suction = RewTerm(
+        func=mdp.reward_lift_target_when_suction,
+        weight=4.0,
+        params=dict(
+            z_lift_min=0.03,
+            z_lift_max=0.15,
+            scale=1.0,
+        ),
+    )
+
     # NEW: NEXT / commit reward (put LAST: it can advance the command).
     next_commit_success = RewTerm(
         func=mdp.reward_next_commit_success,
@@ -142,6 +233,12 @@ class RewardsCfg:
             R_commit=8.0,            # positive reward for correct NEXT
             advance_command=True,    # resample command on correct commit
         ),
+    )
+
+    moc_metrics_logger = RewTerm(
+        func=mdp.reward_log_metrics,
+        weight=0.0,
+        params={},
     )
 
 

@@ -139,13 +139,13 @@ class UR10LongSuctionMOCSceneCfg(ObjectTableSceneCfg):
         ),
     )
 
-    # gripper igual que antes
     surface_gripper: SurfaceGripperCfg = SurfaceGripperCfg(
         prim_path="{ENV_REGEX_NS}/Robot/ee_link/SurfaceGripper",
-        max_grip_distance=0.0075,
+        max_grip_distance=0.02, # 2 cm
+        retry_interval=0.0, # reintenta sin esperar (evita misses por sincronía con control)
+        # Mantén fuerzas altas, interesa que aguante transporte
         shear_force_limit=5000.0,
         coaxial_force_limit=5000.0,
-        retry_interval=0.05,
     )
     
 
@@ -184,15 +184,19 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         # Robot
         self.scene.robot = UR10_LONG_SUCTION_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
-        # End-effector frame transformer
+        # End-effector frame transformer (TIP via offset from ee_link rigid body)
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/base_link",
             debug_vis=False,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/ee_link",
-                    name="end_effector",
-                    offset=OffsetCfg(pos=[0.22, 0.0, 0.0]),
+                    prim_path="{ENV_REGEX_NS}/Robot/ee_link",   # rigid body OK
+                    name="tip",
+                    offset=OffsetCfg(
+                        # Offset ee_link -> Tip
+                        pos=[0.21282, 0.0, 0.0],
+                        # rot=[1.0, 0.0, 0.0, 0.0], # identity (w,x,y,z)
+                    ),
                 ),
             ],
         )

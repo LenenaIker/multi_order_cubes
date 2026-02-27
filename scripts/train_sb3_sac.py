@@ -262,6 +262,14 @@ def main():
         verbose=1,
     )
 
+    obs, _ = env.reset()
+
+    robot = env.scene["robot"]
+    print("\n=== BODY NAMES ===")
+    for i, name in enumerate(robot.data.body_names):
+        print(i, name)
+    print("==================\n")
+
     model.learn(
         total_timesteps=int(args.total_timesteps),
         callback=[checkpoint_cb, dump_cb, best_cb, info_tb_cb],

@@ -107,8 +107,7 @@ class TerminationsCfg:
         func=mdp.ee_below_table,
         params=dict(
             table_z=0.0199,
-            z_margin_below_slots=0.002,
-            body_name_regex_tip=r"(tool|ee|tcp|suction)",
+            z_margin_below_slots=0.002
         )
     )
 
@@ -155,25 +154,12 @@ class RewardsCfg:
         ),
     )
 
-    # (Optional) add other shaping terms here ...
-
-    next_commit_fail = RewTerm(
-        func=mdp.reward_next_commit_fail,
+    far_from_target_penalty = RewTerm(
+        func=mdp.reward_penalty_far_from_target,
         weight=1.0,
         params=dict(
-            tau=0.0,
-            stable_window=3,
-            cooldown_steps=8,
-            R_false=2.0,             # penalty for premature NEXT
-        ),
-    )
-
-    wait_after_success = RewTerm(
-        func=mdp.reward_wait_after_success,
-        weight=1.0,
-        params=dict(
-            stable_window=3,
-            lambda_wait=0.05,        # small negative while success is stable but NEXT not fired
+            sigma=0.2,
+            lambda_far=0.5,
         ),
     )
 
@@ -191,26 +177,20 @@ class RewardsCfg:
     # Reward using suction when close to target (tool usage)
     suction_near_target = RewTerm(
         func=mdp.reward_suction_near_target,
-        weight=1.0,
+        weight=1,
         params=dict(
             sigma=0.08,
-            scale_proximity=3.0,
+            # Reduce "hover" reward
+            scale_proximity=0.5,
+            # Make "try suction correctly" very attractive
+            scale_bonus_if_suction_cmd=4.0,
             scale_bonus_if_suction_on=4.0,
-            body_name_regex_tip=r"(tool|ee|tcp|suction)",
-        ),
+            # Alignment shaping (X+ should point to world up)
+            scale_align=2.0,
+            align_power=4.0,
+        )
     )
-    
-    # Penalize using elbow to move cubes
-    elbow_near_cubes_penalty = RewTerm(
-        func=mdp.reward_penalize_elbow_near_cubes,
-        weight=1.0,
-        params=dict(
-            safe_in_slot_pitches=0.55,   # ajusta 0.35–0.70 según “2–3 cubos”
-            penalty_scale=12.0,
-            body_name_regex=r"(elbow|forearm)",
-        ),
-    )
-
+        
     # Reward lifting target once suction is active
     lift_target_when_suction = RewTerm(
         func=mdp.reward_lift_target_when_suction,
@@ -222,17 +202,22 @@ class RewardsCfg:
         ),
     )
 
-    # NEW: NEXT / commit reward (put LAST: it can advance the command).
-    next_commit_success = RewTerm(
-        func=mdp.reward_next_commit_success,
+    next_by_phase = RewTerm(
+        func=mdp.reward_next_by_phase,
         weight=1.0,
         params=dict(
-            tau=0.0,                 # threshold on moc_next_signal if in [-1,1]
-            stable_window=3,         # M steps stable
-            cooldown_steps=8,        # anti-spam
-            R_commit=8.0,            # positive reward for correct NEXT
-            advance_command=True,    # resample command on correct commit
+            tau=0.0,
+            cooldown_steps=30,
+            R_next_ok=8.0,
+            R_next_bad=3.0,
+            advance_command=True,
         ),
+    )
+
+    joint_vel_penalty = RewTerm(
+        func=mdp.reward_penalty_joint_vel,
+        weight=1.0,
+        params=dict(lambda_vel=0.01),
     )
 
     moc_metrics_logger = RewTerm(
@@ -281,10 +266,10 @@ class MOCEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.slot_positions = torch.tensor(
             [
-                [0.6, 0.3, 0.021],
-                [0.6, 0.1, 0.021],
-                [0.6, -0.1, 0.021],
-                [0.6, -0.3, 0.021],
+                [0.87, 0.3, 0.021],
+                [0.87, 0.1, 0.021],
+                [0.87, -0.1, 0.021],
+                [0.87, -0.3, 0.021],
             ],
             dtype=torch.float32,
         )

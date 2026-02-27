@@ -21,6 +21,148 @@ from .step_cache import get_active_cube_pos_w, get_slots_w
 # Buffers / state helpers
 # -------------------------
 
+
+def _quat_conj(q: torch.Tensor) -> torch.Tensor:
+    # q: (..., 4) as (w, x, y, z)
+    w, x, y, z = q.unbind(-1)
+    return torch.stack((w, -x, -y, -z), dim=-1)
+
+def _quat_mul(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    # Hamilton product, both (..., 4) in (w, x, y, z)
+    aw, ax, ay, az = a.unbind(-1)
+    bw, bx, by, bz = b.unbind(-1)
+    return torch.stack(
+        (
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        ),
+        dim=-1,
+    )
+
+def _quat_apply(q: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    # Rotate vector v by quaternion q. q: (...,4), v: (...,3)
+    # Returns (...,3)
+    zeros = torch.zeros_like(v[..., :1])
+    v_as_quat = torch.cat((zeros, v), dim=-1)  # (0, vx, vy, vz)
+    return _quat_mul(_quat_mul(q, v_as_quat), _quat_conj(q))[..., 1:]
+
+
+def _update_phase_machine(
+    env: "ManagerBasedRLEnv",
+    # thresholds
+    dist_near: float = 0.035,      # tip->cube "near enough" to attempt suction
+    align_min: float = 0.6,        # axis alignment requirement
+    hold_steps: int = 3,           # consecutive steps required for transitions
+    lift_z_min: float = 0.03,      # cube considered lifted
+    place_xy_tol: float = 0.05,    # cube near slot (XY)
+    place_z_max: float = 0.04,     # cube low enough to be "placed"
+) -> None:
+    """
+    Updates env.moc_phase in-place.
+    phases:
+      1: approach (get close + aligned)
+      2: suction_hold (try suction, keep stable)
+      3: lift_move_place (suction_on and lifted; move near slot)
+      4: release_hold (release suction while stable/near slot)
+      5: ready_next (task completed; NEXT is allowed & rewarded)
+    """
+
+    ensure_command_buffer(env)
+    ensure_moc_buffers(env)
+
+    # detect episode reset: episode_length decreases (typically to 0)
+    if hasattr(env, "episode_length_buf") and env.episode_length_buf is not None:
+        ep = env.episode_length_buf.to(torch.int32)
+        reset_now = ep < env.moc_prev_ep_len
+        # also treat ep==0 as reset boundary
+        reset_now = reset_now | (ep == 0)
+        if reset_now.any():
+            env.moc_phase = torch.where(reset_now, torch.ones_like(env.moc_phase), env.moc_phase)
+            env.moc_phase_hold = torch.where(reset_now, torch.zeros_like(env.moc_phase_hold), env.moc_phase_hold)
+        env.moc_prev_ep_len = ep
+
+    # required scene data
+    ee_frame = env.scene["ee_frame"]
+    tip_pos = ee_frame.data.target_pos_w[:, 0, :3]  # (N,3)
+
+    cubes_pos = get_active_cube_pos_w(env)  # (N,3,3)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt_pos = cubes_pos[idx, tgt, :]        # (N,3)
+
+    # distance to target
+    dist = torch.linalg.norm(tip_pos - tgt_pos, dim=-1)  # (N,)
+
+    # alignment: tip local +X axis vs direction tip->cube (robust)
+    align = torch.ones((env.num_envs,), dtype=torch.float32, device=env.device)
+    if hasattr(ee_frame.data, "target_quat_w"):
+        tip_quat = ee_frame.data.target_quat_w[:, 0, :4]
+        x_local = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=env.device).expand(env.num_envs, 3)
+        x_world = _quat_apply(tip_quat, x_local)
+
+        to_cube = tgt_pos - tip_pos
+        to_cube_dir = to_cube / (torch.linalg.norm(to_cube, dim=-1, keepdim=True) + 1e-6)
+        dot = torch.sum(x_world * to_cube_dir, dim=-1)
+        align = torch.clamp(dot, 0.0, 1.0)
+
+    suction_on = _get_suction_state(env)   # (N,) float {0,1}
+    suction_cmd = _get_suction_cmd(env)   # (N,) float {0,1}
+
+    # cube lifted?
+    lifted = _is_lifted_target(env, z_lift_min=lift_z_min)  # (N,) float {0,1}
+    lifted_b = lifted > 0.5
+
+    # slot target pos
+    slots_w = get_slots_w(env)  # (N,4,3)
+    to_id = torch.clamp(env.moc_to_slot_id, 0, 3).to(torch.long) if hasattr(env, "moc_to_slot_id") else None
+    if to_id is None:
+        # if your env doesn't expose to_slot id, do nothing (phases won't progress past 3)
+        return
+    to_pos = slots_w[idx, to_id, :]  # (N,3)
+
+    cube_xy = tgt_pos[:, :2]
+    slot_xy = to_pos[:, :2]
+    dist_xy_slot = torch.linalg.norm(cube_xy - slot_xy, dim=-1)
+
+    placed_near = (dist_xy_slot < place_xy_tol) & (tgt_pos[:, 2] < place_z_max)
+
+    # common gates
+    near_aligned = (dist < dist_near) & (align > align_min)
+
+    # hold counter update (for stable transitions)
+    hold = env.moc_phase_hold
+
+    # phase transitions
+    p = env.moc_phase
+
+    # Phase 1 -> 2: close+aligned AND suction_cmd asserted
+    cond_12 = near_aligned & (suction_cmd > 0.5) & (p == 1)
+    hold = torch.where(cond_12, hold + 1, torch.zeros_like(hold))
+    to2 = cond_12 & (hold >= hold_steps)
+    p = torch.where(to2, torch.full_like(p, 2), p)
+
+    # Phase 2 -> 3: suction engaged
+    to3 = (p == 2) & (suction_on > 0.5)
+    p = torch.where(to3, torch.full_like(p, 3), p)
+
+    # Phase 3 -> 4: cube placed near slot AND still suction_on (so we can release)
+    to4 = (p == 3) & placed_near & (suction_on > 0.5)
+    p = torch.where(to4, torch.full_like(p, 4), p)
+
+    # Phase 4 -> 5: suction released (cmd off OR suction_on off) while placed_near
+    released = (suction_on <= 0.5) & (suction_cmd <= 0.5)
+    to5 = (p == 4) & placed_near & released
+    p = torch.where(to5, torch.full_like(p, 5), p)
+
+    # write back
+    env.moc_phase = p
+    env.moc_phase_hold = hold
+
+    _log_kv(env, "phase", p.to(torch.float32))
+
+
 def _ensure_next_buffers(env: "ManagerBasedRLEnv") -> None:
     """Lazy init of NEXT-related buffers on env."""
     if not hasattr(env, "moc_success_count") or env.moc_success_count is None:
@@ -76,14 +218,19 @@ def _update_stable_success(
 
 
 
-
 def _next_fired(env: "ManagerBasedRLEnv", tau: float) -> torch.Tensor:
     """
-    Convert continuous env.moc_next_signal into boolean NEXT fired.
-    Assumes env.moc_next_signal in [-1,1] => tau=0 is typical.
+    Rising-edge detector for NEXT.
+    Returns True only on transition: (signal <= tau) -> (signal > tau).
+    Prevents multiple fires while the agent holds the button.
     """
     _ensure_next_buffers(env)
-    return env.moc_next_signal > float(tau)
+    ensure_moc_buffers(env)  # from commands.py
+
+    cur = env.moc_next_signal > float(tau)          # (N,) bool
+    fired = cur & (~env.moc_next_prev)              # rising edge only
+    env.moc_next_prev = cur
+    return fired
 
 
 def _cooldown_ok(env: "ManagerBasedRLEnv") -> torch.Tensor:
@@ -172,6 +319,93 @@ def reward_next_commit_success(
 
     _step_cooldown(env)
     return rew
+
+
+def reward_next_by_phase(
+    env: "ManagerBasedRLEnv",
+    tau: float = 0.0,
+    cooldown_steps: int = 30,
+    R_next_ok: float = 8.0,
+    R_next_bad: float = 3.0,
+    advance_command: bool = True,
+) -> torch.Tensor:
+    """
+    NEXT is only "valid" in phase 5.
+    - If NEXT fired in phase 5: +R_next_ok and (optionally) advance command + reset phase to 1
+    - If NEXT fired before phase 5: -R_next_bad and DO NOT advance command
+    """
+
+    _ensure_next_buffers(env)
+    ensure_moc_buffers(env)
+
+    # update cooldown once per step
+    _step_cooldown(env)
+
+    # update phase machine (must run frequently; here is fine)
+    _update_phase_machine(env)
+
+    fired = _next_fired(env, tau)
+    can_fire = _cooldown_ok(env)
+    next_evt = fired & can_fire
+
+    phase5 = env.moc_phase == 5
+    ok = next_evt & phase5
+    bad = next_evt & (~phase5)
+
+    # reward/penalty
+    rew = ok.to(torch.float32) * float(R_next_ok) - bad.to(torch.float32) * float(R_next_bad)
+
+    # cooldown on any attempt (ok or bad)
+    _trigger_cooldown(env, next_evt, cooldown_steps)
+
+    # only advance command when ok
+    if advance_command and ok.any():
+        env_ids = torch.nonzero(ok, as_tuple=False).squeeze(-1)
+        sample_command_from_to(env, env_ids=env_ids)
+
+        # reset phase for those envs
+        env.moc_phase[env_ids] = 1
+        env.moc_phase_hold[env_ids] = 0
+
+    _log_kv(env, "next_evt", next_evt.to(torch.float32))
+    _log_kv(env, "next_ok", ok.to(torch.float32))
+    _log_kv(env, "next_bad", bad.to(torch.float32))
+
+    return rew
+
+def reward_penalty_far_from_target(
+    env: "ManagerBasedRLEnv",
+    sigma: float = 0.2,
+    lambda_far: float = 0.5,
+) -> torch.Tensor:
+    """
+    Penaliza estar lejos del cubo target.
+    Crece suavemente con la distancia.
+    """
+
+    ee_frame = env.scene["ee_frame"]
+    tip_pos = ee_frame.data.target_pos_w[:, 0, :3]
+
+    cubes_pos = get_active_cube_pos_w(env)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt_pos = cubes_pos[idx, tgt, :]
+
+    dist = torch.linalg.norm(tip_pos - tgt_pos, dim=-1)
+
+    # penalización suave creciente
+    penalty = lambda_far * (1.0 - torch.exp(-dist / sigma))
+
+    return -penalty
+
+def reward_penalty_joint_vel(
+    env: "ManagerBasedRLEnv",
+    lambda_vel: float = 0.01,
+) -> torch.Tensor:
+    """Small penalty on joint velocity magnitude (smooth motion)."""
+    robot = env.scene["robot"]
+    qd = robot.data.joint_vel  # (N, dof)
+    return -lambda_vel * torch.linalg.norm(qd, dim=-1)
 
 
 def reward_next_commit_fail(
@@ -331,6 +565,64 @@ def _get_suction_state(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
 
 
+def _get_suction_cmd(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """
+    Return (N,) float tensor in {0,1} indicating the *command* to close suction
+    (independent from sg.state).
+
+    We try to read the ActionTerm named 'gripper_action' (as in env cfg).
+    If not accessible, returns zeros (safe fallback).
+    """
+    zeros = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    am = getattr(env, "action_manager", None)
+    if am is None:
+        return zeros
+
+    term = None
+
+    # Try common APIs / internals (Isaac Lab versions differ)
+    for attr in ("get_term",):
+        fn = getattr(am, attr, None)
+        if callable(fn):
+            try:
+                term = fn("gripper_action")
+                break
+            except Exception:
+                pass
+
+    if term is None:
+        for attr in ("terms", "_terms", "_action_terms", "action_terms"):
+            d = getattr(am, attr, None)
+            if isinstance(d, dict) and "gripper_action" in d:
+                term = d["gripper_action"]
+                break
+
+    if term is None:
+        return zeros
+
+    # Extract latest processed/raw command
+    cmd = None
+    for attr in ("processed_actions", "raw_actions"):
+        try:
+            a = getattr(term, attr)
+            if callable(a):
+                a = a()
+            if isinstance(a, torch.Tensor):
+                cmd = a
+                break
+        except Exception:
+            pass
+
+    if cmd is None:
+        return zeros
+
+    # SurfaceGripperBinaryActionCfg: close_command=+1, open_command=-1
+    # Treat >0 as "close" command.
+    cmd = cmd.view(env.num_envs, -1)[:, 0]
+    return (cmd > 0.0).to(torch.float32)
+
+
 # -------------------------
 # Tool-success gating + lightweight logging helpers
 # -------------------------
@@ -422,17 +714,20 @@ def reward_shaping_ee_to_target_pregrasp_3d(
 def reward_suction_near_target(
     env: "ManagerBasedRLEnv",
     sigma: float = 0.08,
-    scale_proximity: float = 2.0,
-    scale_bonus_if_suction_on: float = 2.0,
-    body_name_regex_tip: str = r"(tool|ee|tcp|suction)",
+    scale_proximity: float = 0.5,
+    scale_bonus_if_suction_cmd: float = 4.0,
+    scale_bonus_if_suction_on: float = 4.0,
+    scale_align: float = 2.0,
+    align_power: float = 4.0,
 ) -> torch.Tensor:
     """
-    Reward por acercar la PUNTA (tip) al cubo target.
-    - Siempre da shaping (aunque suction esté OFF) => gradiente útil desde el inicio.
-    - Da bonus adicional si suction está ON estando cerca (empuja a activar suction cerca).
+    Reward por acercar la PUNTA (Tip) al cubo target + empujar a activar succión.
 
     prox = exp(-dist/sigma)
-    reward = scale_proximity*prox + scale_bonus_if_suction_on*suction_on*prox
+
+    reward = scale_proximity*prox
+           + scale_bonus_if_suction_cmd*suction_cmd*prox   (engage: manda cerrar cerca)
+           + scale_bonus_if_suction_on*suction_on*prox     (cuando ya está ON)
     """
     ensure_command_buffer(env)
     ensure_moc_buffers(env)
@@ -440,21 +735,44 @@ def reward_suction_near_target(
     if not hasattr(env, "target_cube_id") or env.target_cube_id is None:
         return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
 
-    # Prefer ee_frame if exists; fallback to a tip link by regex
-    tip_pos = None
+    # Tip position MUST come from ee_frame (now configured to .../ee_link/Tip).
     try:
         ee_frame = env.scene["ee_frame"]
-        tip_pos = ee_frame.data.target_pos_w[:, 0, :3]
-        tip_found = torch.ones((env.num_envs,), dtype=torch.float32, device=env.device)
-    except KeyError:
-        tip_pos, tip_found = _get_body_pos_by_regex(
-            env,
-            body_name_regex=body_name_regex_tip,
-            cache_attr="_moc_tip_body_id",
-        )
+    except KeyError as e:
+        raise RuntimeError(
+            "env.scene['ee_frame'] missing. Check moc_ur10_env_cfg.py: ee_frame must target "
+            "'{ENV_REGEX_NS}/Robot/ee_link/Tip'."
+        ) from e
 
-    if torch.all(tip_found == 0):
-        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+    tip_pos = ee_frame.data.target_pos_w[:, 0, :3]  # (N,3)
+
+    # Target cube position
+    cubes_pos = get_active_cube_pos_w(env)  # (N,3,3)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt_pos = cubes_pos[idx, tgt, :]  # (N,3)
+
+    # Distance + proximity
+    dist = torch.linalg.vector_norm(tip_pos - tgt_pos, dim=-1)  # (N,)
+    prox = torch.exp(-dist / float(sigma))
+
+    # --- Alignment term: align local +X axis of tip with vector (tip -> target cube)
+    align = torch.ones((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    if hasattr(ee_frame.data, "target_quat_w"):
+        tip_quat = ee_frame.data.target_quat_w[:, 0, :4]
+
+        # local +X axis in world
+        x_local = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=env.device).expand(env.num_envs, 3)
+        x_world = _quat_apply(tip_quat, x_local)
+
+        # direction tip -> cube
+        to_cube = tgt_pos - tip_pos
+        to_cube_dir = to_cube / (torch.linalg.norm(to_cube, dim=-1, keepdim=True) + 1e-6)
+
+        dot = torch.sum(x_world * to_cube_dir, dim=-1)
+        align = torch.clamp(dot, min=0.0, max=1.0) ** align_power
+
 
     cubes_pos = get_active_cube_pos_w(env)  # (N,3,3)
     tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
@@ -464,14 +782,27 @@ def reward_suction_near_target(
     dist = torch.linalg.vector_norm(tip_pos - tgt_pos, dim=-1)  # (N,)
     prox = torch.exp(-dist / float(sigma))
 
-    suction_on = _get_suction_state(env)  # (N,) float {0,1}
+    suction_on = _get_suction_state(env)     # (N,) float {0,1}
+    suction_cmd = _get_suction_cmd(env)      # (N,) float {0,1}
 
-    # Log
+    # Log (TensorBoard)
     _log_kv(env, "dist_tip_to_target_3d", dist)
     _log_kv(env, "prox_tip_to_target", prox)
     _log_kv(env, "suction_on", (suction_on > 0).to(torch.float32))
+    _log_kv(env, "suction_cmd", (suction_cmd > 0).to(torch.float32))
 
-    return float(scale_proximity) * prox + float(scale_bonus_if_suction_on) * suction_on * prox
+    # prox = torch.exp(-dist / sigma)
+
+    # Base: proximity small (prevents "hover is enough")
+    reward = scale_proximity * prox
+
+    # Strong incentive to actually try suction when correctly aligned and close
+    reward = reward + scale_bonus_if_suction_cmd * suction_cmd * prox * (scale_align * align)
+
+    # When suction is ON, keep paying (still shaped by being close)
+    reward = reward + scale_bonus_if_suction_on * suction_on * prox
+
+    return reward
 
 
 def reward_lift_target_when_suction(
@@ -596,6 +927,8 @@ def reward_log_metrics(env: "ManagerBasedRLEnv") -> torch.Tensor:
 
     # Basic signals
     suction = (_get_suction_state(env) > 0).to(torch.float32)
+    suction_cmd = _get_suction_cmd(env)
+    _log_kv(env, "suction_cmd", suction_cmd)
     lifted = _is_lifted_target(env, z_lift_min=0.03)
     stable = _update_stable_success(env, stable_window=3).to(torch.float32)
     tool_succ = (stable > 0) * suction * (lifted > 0).to(torch.float32)

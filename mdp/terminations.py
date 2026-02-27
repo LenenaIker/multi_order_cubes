@@ -75,31 +75,20 @@ def ee_below_table(
     env: "ManagerBasedRLEnv",
     table_z: float = 0.0199,
     z_margin_below_slots: float = 0.002,
-    body_name_regex_tip: str = r"(tool|ee|tcp|suction)",
 ) -> torch.Tensor:
+    """
+    Terminates if Tip (ee_frame) goes below table threshold.
+    We REQUIRE ee_frame to exist to avoid silent dead terminations.
+    """
     try:
         ee_frame = env.scene["ee_frame"]
-        tip_pos = ee_frame.data.target_pos_w[:, 0, :3]
-    except KeyError:
-        robot = env.scene["robot"]
-        zeros = torch.zeros((env.num_envs, 3), dtype=torch.float32, device=env.device)
+    except KeyError as e:
+        raise RuntimeError(
+            "ee_below_table: env.scene['ee_frame'] missing. "
+            "Check moc_ur10_env_cfg.py: ee_frame must target '{ENV_REGEX_NS}/Robot/ee_link/Tip'."
+        ) from e
 
-        cache_attr = "_moc_tip_body_id_term"
-        body_id = getattr(env, cache_attr, None)
-        if body_id is None:
-            names = list(robot.data.body_names)
-            pat = re.compile(body_name_regex_tip)
-            matches = [i for i, n in enumerate(names) if pat.search(n)]
-            setattr(env, cache_attr, int(matches[0]) if matches else -1)
-            body_id = getattr(env, cache_attr)
-
-        if int(body_id) < 0:
-            return torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
-
-        tip_pos = robot.data.body_pos_w[:, int(body_id), :3]
-        if tip_pos is None:
-            tip_pos = zeros
-
+    tip_pos = ee_frame.data.target_pos_w[:, 0, :3]
     z_thresh = float(table_z) - float(z_margin_below_slots)
     return tip_pos[:, 2] < z_thresh
 

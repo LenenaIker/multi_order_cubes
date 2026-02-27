@@ -84,6 +84,23 @@ def ensure_moc_buffers(env: ManagerBasedRLEnv):
         env.moc_cmd_cube_pos_xy0 = torch.zeros((env.num_envs, 3, 2), dtype=torch.float32, device=env.device)
     if not hasattr(env, "moc_cmd_stamp") or env.moc_cmd_stamp is None:
         env.moc_cmd_stamp = -torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
+    
+    # --- Phase machine buffers (per-env) ---
+    if not hasattr(env, "moc_phase") or env.moc_phase is None:
+        # phases: 1=approach, 2=suction_hold, 3=lift_move_place, 4=release_hold, 5=ready_next
+        env.moc_phase = torch.ones((env.num_envs,), dtype=torch.int32, device=env.device)
+
+    if not hasattr(env, "moc_phase_hold") or env.moc_phase_hold is None:
+        # small counter to require conditions for a few consecutive steps
+        env.moc_phase_hold = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
+
+    if not hasattr(env, "moc_prev_ep_len") or env.moc_prev_ep_len is None:
+        # to detect episode reset (ep_len decreases to 0)
+        env.moc_prev_ep_len = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
+
+    # --- NEXT edge detect (prevents multi-fire while holding the button) ---
+    if not hasattr(env, "moc_next_prev") or env.moc_next_prev is None:
+        env.moc_next_prev = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
 
 
 def latch_command_state(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> None:

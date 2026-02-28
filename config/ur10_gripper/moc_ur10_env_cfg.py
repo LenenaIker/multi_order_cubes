@@ -187,7 +187,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         # End-effector frame transformer (TIP via offset from ee_link rigid body)
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/base_link",
-            debug_vis=False,
+            debug_vis=True,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
                     prim_path="{ENV_REGEX_NS}/Robot/ee_link",   # rigid body OK

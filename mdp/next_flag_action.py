@@ -1,4 +1,3 @@
-# multi_order_cubes/mdp/next_flag_action.py
 from __future__ import annotations
 
 import torch
@@ -27,28 +26,14 @@ class NextFlagAction(ActionTerm):
         return self._processed
 
     def process_actions(self, actions: torch.Tensor) -> None:
-        """
-        Called by ActionManager every step with the slice of the full action vector
-        corresponding to this term.
-        """
         a = actions.view(-1, 1).to(torch.float32)
         self._raw[:] = a
-
-        # No special processing; clamp to [-1, 1] for safety
         self._processed[:] = torch.clamp(a, -1.0, 1.0)
 
     def apply_actions(self) -> None:
-        """
-        Called after process_actions. Applies the processed actions to the environment.
-        Here we just write a scalar per env.
-        """
-        self._env.moc_next_signal = self._processed.view(-1)
+        """Write NEXT signal into env.moc_next_signal (no physics actuation)."""
+        self._env.moc_next_signal = self._processed.view(-1)  # (num_envs,)
 
-        # ---- step counter for cache invalidation ----
-        # This runs once per env-step, so it is a cheap & reliable global step id.
-        if not hasattr(self._env, "_moc_step_id") or self._env._moc_step_id is None:
-            self._env._moc_step_id = 0
-        self._env._moc_step_id += 1
 
 @configclass
 class NextFlagActionCfg(ActionTermCfg):

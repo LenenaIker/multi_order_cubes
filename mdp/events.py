@@ -7,15 +7,10 @@ if TYPE_CHECKING:
 
 import torch
 
+from .constants import CUBE_KEYS_9
 from .commands import sample_command_from_to
 
 
-# ---- cube registry (order matters) ----
-CUBE_KEYS_9 = [
-    "cube_light_s", "cube_light_m", "cube_light_l",
-    "cube_flat_s",  "cube_flat_m",  "cube_flat_l",
-    "cube_dark_s",  "cube_dark_m",  "cube_dark_l",
-]
 
 # indices helper:
 # light: 0..2, flat: 3..5, dark: 6..8

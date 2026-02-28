@@ -147,19 +147,28 @@ class RewardsCfg:
     # Keep this BEFORE next_commit_success so its baseline uses the *current* command.
     disturb_other_cubes = RewTerm(
         func=mdp.reward_penalty_disturb_other_cubes,
-        weight=1.0,
+        weight=0.1,
         params=dict(
             lambda_disturb=0.25,
             tol_xy=0.01,
         ),
     )
 
-    far_from_target_penalty = RewTerm(
-        func=mdp.reward_penalty_far_from_target,
+    # far_from_target_penalty = RewTerm(
+    #     func=mdp.reward_penalty_far_from_target,
+    #     weight=1.0,
+    #     params=dict(
+    #         sigma=0.2,
+    #         lambda_far=0.5,
+    #     ),
+    # )
+
+    dist_xy_l2_penalty = RewTerm(
+        func=mdp.reward_penalty_dist_xy_l2,
         weight=1.0,
         params=dict(
-            sigma=0.2,
-            lambda_far=0.5,
+            sigma_xy=0.25,
+            scale=1.0,
         ),
     )
 
@@ -216,8 +225,41 @@ class RewardsCfg:
 
     joint_vel_penalty = RewTerm(
         func=mdp.reward_penalty_joint_vel,
-        weight=1.0,
+        weight=0.07,
         params=dict(lambda_vel=0.01),
+    )
+
+    # Atracción fuerte y suave (reach-style)
+    reach_xy = RewTerm(
+        func=mdp.reward_reach_xy_tanh,
+        weight=2.0,
+        params=dict(std_xy=0.25),
+    )
+
+    reach_3d = RewTerm(
+        func=mdp.reward_reach_3d_tanh,
+        weight=1.0,
+        params=dict(std_3d=0.35),
+    )
+
+    # Empuja a BAJAR a la altura de grasp (clave para llegar a contacto)
+    grasp_height = RewTerm(
+        func=mdp.reward_grasp_height_tanh,
+        weight=2.0,
+        params=dict(grasp_z_offset=0.03, std_z=0.06),
+    )
+
+    # Succión solo cuando estás en zona de grasp (y penaliza fuera)
+    suction_cmd_gated = RewTerm(
+        func=mdp.reward_suction_cmd_gated,
+        weight=3.0,
+        params=dict(gain=1.0, xy_tol=0.04, z_tol=0.05, grasp_z_offset=0.03),
+    )
+
+    suction_cmd_outside_penalty = RewTerm(
+        func=mdp.penalty_suction_cmd_outside,
+        weight=1.0,
+        params=dict(penalty=0.2, xy_tol=0.06, z_tol=0.07, grasp_z_offset=0.03),
     )
 
     moc_metrics_logger = RewTerm(

@@ -114,13 +114,12 @@ def _update_phase_machine(
     lifted = _is_lifted_target(env, z_lift_min=lift_z_min)  # (N,) float {0,1}
     lifted_b = lifted > 0.5
 
-    # slot target pos
     slots_w = get_slots_w(env)  # (N,4,3)
-    to_id = torch.clamp(env.moc_to_slot_id, 0, 3).to(torch.long) if hasattr(env, "moc_to_slot_id") else None
-    if to_id is None:
-        # if your env doesn't expose to_slot id, do nothing (phases won't progress past 3)
-        return
+    # Use the commanded "to" slot from env.command_from_to (1..4)
+    # command_from_to[:, 1] = to_slot in 1..4
+    to_id = torch.clamp(env.command_from_to[:, 1] - 1, 0, 3).to(torch.long)
     to_pos = slots_w[idx, to_id, :]  # (N,3)
+
 
     cube_xy = tgt_pos[:, :2]
     slot_xy = to_pos[:, :2]
@@ -358,14 +357,24 @@ def reward_next_by_phase(
     # cooldown on any attempt (ok or bad)
     _trigger_cooldown(env, next_evt, cooldown_steps)
 
-    # only advance command when ok
+    # only advance command when ok (idempotent per-step)
     if advance_command and ok.any():
-        env_ids = torch.nonzero(ok, as_tuple=False).squeeze(-1)
-        sample_command_from_to(env, env_ids=env_ids)
+        if not hasattr(env, "episode_length_buf"):
+            raise AttributeError("env.episode_length_buf required for idempotent NEXT advance.")
 
-        # reset phase for those envs
-        env.moc_phase[env_ids] = 1
-        env.moc_phase_hold[env_ids] = 0
+        sid = env.episode_length_buf.to(torch.int32)  # (N,)
+        can_advance = ok & (env.moc_cmd_advanced_step != sid)
+
+        if can_advance.any():
+            env_ids = torch.nonzero(can_advance, as_tuple=False).squeeze(-1)
+            sample_command_from_to(env, env_ids=env_ids)
+
+            # reset phase for those envs
+            env.moc_phase[env_ids] = 1
+            env.moc_phase_hold[env_ids] = 0
+
+            # mark as advanced this step
+            env.moc_cmd_advanced_step = torch.where(can_advance, sid, env.moc_cmd_advanced_step)
 
     _log_kv(env, "next_evt", next_evt.to(torch.float32))
     _log_kv(env, "next_ok", ok.to(torch.float32))
@@ -490,6 +499,117 @@ def reward_penalty_disturb_other_cubes(
     return -float(lambda_disturb) * penalty
 
 
+def reward_penalty_dist_xy_l2(
+    env: "ManagerBasedRLEnv",
+    sigma_xy: float = 0.25,
+    scale: float = 1.0,
+) -> torch.Tensor:
+    """
+    Negative distance penalty without a hard saturation plateau:
+      r = -scale * (dist_xy / sigma_xy)
+    """
+    ensure_command_buffer(env)
+    ee_frame = env.scene["ee_frame"]
+
+    tip_pos = ee_frame.data.target_pos_w[:, 0, :3]  # (N,3)
+    cubes_pos = get_active_cube_pos_w(env)          # (N,3,3)
+
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt_pos = cubes_pos[idx, tgt, :]
+
+    dist_xy = torch.linalg.norm((tip_pos - tgt_pos)[:, :2], dim=-1)
+    r = -scale * (dist_xy / (sigma_xy + 1e-6))
+    _log_kv(env, "dist_xy", dist_xy)
+    return r
+
+
+def _tanh_kernel(dist: torch.Tensor, std: float) -> torch.Tensor:
+    # in [0,1): 1 - tanh(dist/std)
+    return 1.0 - torch.tanh(dist / (std + 1e-6))
+
+def reward_reach_xy_tanh(env, std_xy: float = 0.25) -> torch.Tensor:
+    ensure_command_buffer(env)
+    ee = env.scene["ee_frame"]
+    tip = ee.data.target_pos_w[:, 0, :3]
+    cubes = get_active_cube_pos_w(env)  # (N,3,3)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    tgt_pos = cubes[idx, tgt, :]
+
+    dist_xy = torch.linalg.norm((tip - tgt_pos)[:, :2], dim=-1)
+    _log_kv(env, "dist_xy", dist_xy)
+    return _tanh_kernel(dist_xy, std_xy)
+
+def reward_reach_3d_tanh(env, std_3d: float = 0.35) -> torch.Tensor:
+    ensure_command_buffer(env)
+    ee = env.scene["ee_frame"]
+    tip = ee.data.target_pos_w[:, 0, :3]
+    cubes = get_active_cube_pos_w(env)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    tgt_pos = cubes[idx, tgt, :]
+
+    dist_3d = torch.linalg.norm(tip - tgt_pos, dim=-1)
+    _log_kv(env, "dist_tip_to_target_3d", dist_3d)
+    return _tanh_kernel(dist_3d, std_3d)
+
+def reward_grasp_height_tanh(env, grasp_z_offset: float = 0.03, std_z: float = 0.06) -> torch.Tensor:
+    """
+    Incentiva que el tip esté a la altura de grasp: z_tip ≈ z_cube + grasp_z_offset.
+    (offset ~ altura del cubo/mitad + margen). Ajusta si hace falta, pero esto ya empuja a bajar.
+    """
+    ensure_command_buffer(env)
+    ee = env.scene["ee_frame"]
+    tip = ee.data.target_pos_w[:, 0, :3]
+    cubes = get_active_cube_pos_w(env)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    tgt_pos = cubes[idx, tgt, :]
+
+    z_err = torch.abs(tip[:, 2] - (tgt_pos[:, 2] + grasp_z_offset))
+    _log_kv(env, "grasp_z_err", z_err)
+    return _tanh_kernel(z_err, std_z)
+
+def reward_in_grasp_zone(env, xy_tol: float = 0.04, z_tol: float = 0.05, grasp_z_offset: float = 0.03) -> torch.Tensor:
+    """
+    (0/1) Está en zona de grasp si está cerca en XY y cerca en Z del plano de grasp.
+    Sirve para gatear rewards de succión.
+    """
+    ensure_command_buffer(env)
+    ee = env.scene["ee_frame"]
+    tip = ee.data.target_pos_w[:, 0, :3]
+    cubes = get_active_cube_pos_w(env)
+    idx = torch.arange(env.num_envs, device=env.device)
+    tgt = torch.clamp(env.target_cube_id, 0, 2).to(torch.long)
+    tgt_pos = cubes[idx, tgt, :]
+
+    dist_xy = torch.linalg.norm((tip - tgt_pos)[:, :2], dim=-1)
+    z_err = torch.abs(tip[:, 2] - (tgt_pos[:, 2] + grasp_z_offset))
+    in_zone = (dist_xy < xy_tol) & (z_err < z_tol)
+    return in_zone.to(torch.float32)
+
+def reward_suction_cmd_gated(env, gain: float = 1.0, xy_tol: float = 0.04, z_tol: float = 0.05, grasp_z_offset: float = 0.03) -> torch.Tensor:
+    """
+    Recompensa aplicar succión SOLO si estás en la zona de grasp.
+    """
+    suction_cmd = _get_suction_cmd(env)  # (N,) 0/1
+    in_zone = reward_in_grasp_zone(env, xy_tol=xy_tol, z_tol=z_tol, grasp_z_offset=grasp_z_offset)
+    out = gain * suction_cmd * in_zone
+    _log_kv(env, "suction_cmd", suction_cmd)
+    _log_kv(env, "in_grasp_zone", in_zone)
+    return out
+
+def penalty_suction_cmd_outside(env, penalty: float = 0.2, xy_tol: float = 0.06, z_tol: float = 0.07, grasp_z_offset: float = 0.03) -> torch.Tensor:
+    """
+    Penaliza succión cuando NO estás cerca: elimina la estrategia de spamear succión lejos.
+    """
+    suction_cmd = _get_suction_cmd(env)
+    in_zone = reward_in_grasp_zone(env, xy_tol=xy_tol, z_tol=z_tol, grasp_z_offset=grasp_z_offset)
+    out = -penalty * suction_cmd * (1.0 - in_zone)
+    return out
+
+
 def reward_shaping_ee_to_target_xy(
     env: "ManagerBasedRLEnv",
     sigma_xy: float = 0.15,
@@ -560,10 +680,16 @@ def _get_suction_state(env: "ManagerBasedRLEnv") -> torch.Tensor:
     if hasattr(env.scene, "surface_grippers") and len(env.scene.surface_grippers) > 0:
         sg = env.scene.surface_grippers["surface_gripper"]
         # Typical state is in {-1,0,1}. Treat >0 as "suction on / engaged".
-        return (sg.state.view(-1) > 0).to(torch.float32)
-    # If no suction gripper exists, return zeros (reward disabled gracefully).
-    return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+        out = (sg.state.view(-1) > 0).to(torch.float32)
 
+        # cache for observations/debug
+        env.moc_suction_on = out.detach()
+
+        return out
+    # If no suction gripper exists, return zeros (reward disabled gracefully).
+    out = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+    env.moc_suction_on = out.detach()
+    return out
 
 def _get_suction_cmd(env: "ManagerBasedRLEnv") -> torch.Tensor:
     """
@@ -620,7 +746,12 @@ def _get_suction_cmd(env: "ManagerBasedRLEnv") -> torch.Tensor:
     # SurfaceGripperBinaryActionCfg: close_command=+1, open_command=-1
     # Treat >0 as "close" command.
     cmd = cmd.view(env.num_envs, -1)[:, 0]
-    return (cmd > 0.0).to(torch.float32)
+    out = (cmd > 0.0).to(torch.float32)
+
+    # cache for observations/debug
+    env.moc_last_suction_cmd = out.detach()
+
+    return out
 
 
 # -------------------------

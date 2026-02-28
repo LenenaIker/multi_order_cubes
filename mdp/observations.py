@@ -162,10 +162,48 @@ def stable_success_hint(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return torch.zeros((env.num_envs, 1), dtype=torch.float32, device=env.device)
 
 
+def next_cooldown_obs(env, max_cooldown_steps: int = 30) -> torch.Tensor:
+    """Expose NEXT cooldown as [0,1]. Helps Markovianity if cooldown affects rewards."""
+    if not hasattr(env, "moc_next_cooldown") or env.moc_next_cooldown is None:
+        return torch.zeros((env.num_envs, 1), dtype=torch.float32, device=env.device)
+
+    cd = env.moc_next_cooldown.to(torch.float32).clamp(min=0.0)
+    denom = float(max(1, int(max_cooldown_steps)))
+    return (cd / denom).unsqueeze(1)
+
+def moc_phase_obs(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """
+    (N,1) phase normalized to [0,1]. If missing, returns 0.
+    """
+    if hasattr(env, "moc_phase") and env.moc_phase is not None:
+        # phases 1..5 -> scale to 0..1
+        p = env.moc_phase.to(torch.float32).clamp(1, 5)
+        return ((p - 1.0) / 4.0).view(-1, 1)
+    return torch.zeros((env.num_envs, 1), dtype=torch.float32, device=env.device)
+
+
+def suction_cmd_on_obs(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """
+    (N,2): [suction_cmd, suction_on] if available, else zeros.
+    """
+    cmd = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+    on = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    # suction_cmd: from last action if your action term stores it, else 0
+    if hasattr(env, "moc_last_suction_cmd") and env.moc_last_suction_cmd is not None:
+        cmd = env.moc_last_suction_cmd.to(torch.float32)
+
+    # suction_on: if you track attachment state somewhere
+    if hasattr(env, "moc_suction_on") and env.moc_suction_on is not None:
+        on = env.moc_suction_on.to(torch.float32)
+
+    return torch.stack([cmd, on], dim=1)
+
+
+
 # -------------------------
 # Observación final "policy"
 # -------------------------
-
 def policy_obs(
     env: ManagerBasedRLEnv,
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
@@ -191,7 +229,10 @@ def policy_obs(
         cubes_slot_occupancy_onehot(env, num_slots=4),
         command_from_to_onehot(env, num_slots=4),
         gripper_state(env, robot_cfg),
-        stable_success_hint(env)
+        stable_success_hint(env),
+        moc_phase_obs(env),
+        suction_cmd_on_obs(env),
+        next_cooldown_obs(env),
     ]
     return torch.cat(obs, dim=1)
 

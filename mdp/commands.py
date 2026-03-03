@@ -99,7 +99,11 @@ def ensure_moc_buffers(env: "ManagerBasedRLEnv") -> None:
 def latch_command_state(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> None:
     """Latch per-command auxiliary state without resampling the command."""
     ensure_command_buffers(env)
-
+    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
+        rid = int(getattr(env, "_moc_reset_id", 0))
+        raise RuntimeError(
+            f"[MOC] latch_command_state without active_cube_indices (reset_id={rid})"
+        )
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
     else:
@@ -111,6 +115,19 @@ def latch_command_state(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = N
     from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)  # (M,)
 
     cubes_pos = active_cube_positions_w(env, env_ids=env_ids)  # (M,3,3)
+    
+    
+    rid = int(getattr(env, "_moc_reset_id", 0))
+    if rid > 0:
+        per_env_abs = cubes_pos.abs().sum(dim=(1, 2))
+        bad = (per_env_abs == 0.0)
+        if bad.any():
+            bad_ids = env_ids[bad].detach().cpu().tolist()
+            raise RuntimeError(
+                f"[MOC] Zero cube positions for env_ids={bad_ids} (reset_id={rid})"
+            )
+    
+    
     slots = slots_w(env, env_ids=env_ids)                      # (M,4,3)
 
     nearest = nearest_slot_for_active_cubes_xy(env).index_select(0, env_ids)  # (M,3)

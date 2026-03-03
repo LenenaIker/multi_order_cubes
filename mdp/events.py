@@ -142,3 +142,34 @@ def randomize_cubes_on_slots(env, env_ids):
             cube.write_root_pose_to_sim(parked_pose, env_ids=sub_env_ids)
             cube.write_root_velocity_to_sim(zero_vel[is_inactive_j], env_ids=sub_env_ids)
             _maybe_set_visibility(cube, False, sub_env_ids)
+
+def moc_reset_on_reset(env: "ManagerBasedRLEnv", env_ids=None):
+    """Unified reset hook with guaranteed ordering."""
+
+    # ---- Reset id (invalidate caches)
+    if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None:
+        env._moc_reset_id = 0
+    env._moc_reset_id += 1
+
+    # ---- 1) Randomize cubes (defines active_cube_indices)
+    randomize_cubes_on_slots(env, env_ids)
+
+    # ---- 2) Best-effort flush so cube poses propagate to .data buffers
+    try:
+        if hasattr(env.scene, "write_data_to_sim"):
+            env.scene.write_data_to_sim()
+        if hasattr(env, "sim") and hasattr(env.sim, "step"):
+            env.sim.step()
+        if hasattr(env.scene, "update"):
+            try:
+                env.scene.update()
+            except TypeError:
+                pass
+    except Exception:
+        pass
+
+    # ---- 3) Sample command
+    sample_command_from_to(env, env_ids=env_ids)
+
+    # ---- 4) Latch target
+    latch_command_state(env, env_ids)

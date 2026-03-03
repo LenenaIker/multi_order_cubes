@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 
 from isaaclab.assets import RigidObjectCfg
-from isaaclab.envs.mdp.actions import JointPositionActionCfg
+from isaaclab.envs.mdp.actions import JointPositionActionCfg, JointPositionToLimitsActionCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
@@ -174,6 +174,20 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         # Robot
         self.scene.robot = UR10e_ROBOTIQ_GRIPPER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
+        # ---- FORCE ARM ACTUATOR LIMITS (UR10e sometimes has no explicit effort/vel limits in cfg)
+        robot_cfg = self.scene.robot
+
+        # Use conservative but non-zero limits; you can tune later.
+        # Values aligned with typical UR10e joint drive maxForce seen in USD (~330) and reasonable vel.
+        for key in ["shoulder", "elbow", "wrist"]:
+            if key in robot_cfg.actuators:
+                act = robot_cfg.actuators[key]
+                # Set only if missing/zero to avoid overriding if already correct in your build
+                if getattr(act, "effort_limit_sim", None) in (None, 0.0):
+                    act.effort_limit_sim = 330.0
+                if getattr(act, "velocity_limit_sim", None) in (None, 0.0):
+                    act.velocity_limit_sim = 3.0
+
         # End-effector frame transformer (TIP via offset from ee_link rigid body)
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/base_link",
@@ -191,7 +205,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         )
 
         # Actions
-        self.actions.arm_action = JointPositionActionCfg(
+        self.actions.arm_action = JointPositionToLimitsActionCfg(
             asset_name="robot",
             joint_names=[
                 "shoulder_pan_joint",
@@ -201,15 +215,19 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
                 "wrist_2_joint",
                 "wrist_3_joint",
             ],
-            scale=0.5,
-            use_default_offset=True,
+            # acción en [-1,1] -> límites del joint; opcionalmente reduce sensibilidad
+            scale={".*": 1.0},
+            clip={".*": (-1.0, 1.0)},
+            rescale_to_limits=True,
         )
 
         self.actions.gripper = JointPositionActionCfg(
             asset_name="robot",
             joint_names=["finger_joint"],
-            scale=0.8,
             use_default_offset=False,
+            preserve_order=True,
+            scale={".*": 0.8},
+            clip={".*": (-1.0, 1.0)},
         )
         # Robotiq: controla/observa el dedo principal
         gripper_joint_names = ["finger_joint"]

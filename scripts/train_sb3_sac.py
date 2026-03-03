@@ -7,6 +7,8 @@ import copy
 from isaaclab.app import AppLauncher
 
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.vec_env import VecEnvWrapper
+import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train SAC with SB3 on multi_order_cubes.")
@@ -204,8 +206,6 @@ def main():
     # SB3 VecEnv adapter (must be LAST wrapper) :contentReference[oaicite:2]{index=2}
     sb3_env = Sb3VecEnvWrapper(env, fast_variant=not args.keep_all_info)
 
-
-
     # Optional: normalize obs/reward (often helps for SAC with dense shaping)
     if not args.no_vecnormalize:
         sb3_env = VecNormalize(sb3_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
@@ -272,7 +272,7 @@ def main():
 
     model.learn(
         total_timesteps=int(args.total_timesteps),
-        callback=[checkpoint_cb, dump_cb, best_cb, info_tb_cb],
+        callback = [checkpoint_cb, info_tb_cb, dump_cb, best_cb],
         log_interval=10,
         progress_bar=True,
     )

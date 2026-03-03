@@ -78,6 +78,33 @@ def cubes_slot_occupancy_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> t
     occ = torch.zeros((env.num_envs, num_slots), dtype=torch.float32, device=env.device)
     occ.scatter_(1, nearest, 1.0)
     return occ
+
+
+def target_cube_pos_in_base_frame(env: "ManagerBasedRLEnv", robot_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    N = env.num_envs
+    device = env.device
+
+    if not hasattr(env, "target_cube_id") or env.target_cube_id is None:
+        return torch.zeros((N, 3), dtype=torch.float32, device=device)
+
+    cubes_pos_w = get_active_cube_pos_w(env)  # (N,3,3)
+    tid = env.target_cube_id.to(torch.long).clamp(0, 2)
+
+    idx = torch.arange(N, device=device)
+    target_pos_w = cubes_pos_w[idx, tid, :]
+
+    robot: Articulation = env.scene[robot_cfg.name]
+    root_pos_w = robot.data.root_pos_w
+    root_quat_w = robot.data.root_quat_w
+
+    ident = torch.tensor([1.0, 0.0, 0.0, 0.0], device=device).view(1, 4).expand(N, 4)
+    target_pos_b, _ = math_utils.subtract_frame_transforms(
+        root_pos_w, root_quat_w, target_pos_w, ident
+    )
+    return target_pos_b
+
+
+
 # -------------------------
 # Robot + EE + cubos
 # -------------------------
@@ -200,6 +227,7 @@ def policy_obs(
     """
     obs = [
         cubes_poses_in_base_frame(env, robot_cfg=robot_cfg),
+        target_cube_pos_in_base_frame(env, robot_cfg=robot_cfg),
         ee_pose_in_base_frame(env, ee_frame_cfg, robot_cfg, return_key=None),
         slot_positions_in_base_frame(env, robot_cfg),
         cubes_slot_occupancy_onehot(env, num_slots=4),

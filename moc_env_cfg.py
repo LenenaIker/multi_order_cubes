@@ -100,18 +100,16 @@ class TerminationsCfg:
 
 @configclass
 class RewardsCfg:
-    # 1) Reach: tip -> punto pregrasp sobre cubo target
     tip_to_target_xy = RewTerm(
         func=mdp.reward_tip_to_target_xy,
-        weight=20.0,
-        params=dict(sigma_xy=0.35),
+        weight=15.0,
+        params=dict(sigma_xy=0.15),
     )
 
-    # 1b) Reach Z: tip -> cubo target en Z (siempre)
     tip_to_target_z = RewTerm(
         func=mdp.reward_tip_to_target_z,
-        weight=3.0,
-        params=dict(z_offset=0.10, sigma_z=0.30),
+        weight=6.0,
+        params=dict(z_offset=0.10, sigma_z=0.06),
     )
 
     close_cmd_in_zone = RewTerm(
@@ -180,15 +178,10 @@ class RewardsCfg:
 class EventsCfg:
     """Events (reset-time hooks)."""
 
-    randomize_cubes = EventTerm(
-        func=mdp.randomize_cubes_on_slots,
+    moc_reset = EventTerm(
+        func=mdp.moc_reset_on_reset,
         mode="reset",
-    )
-
-    sample_from_to = EventTerm(
-        func=mdp.sample_from_to_on_reset,
-        mode="reset",
-        params={},  # no params needed
+        params={},
     )
 
 

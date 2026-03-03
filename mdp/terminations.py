@@ -187,19 +187,22 @@ def move_success(
     if hasattr(env, "target_cube_id") and env.target_cube_id is not None:
         target_cube_id = torch.clamp(env.target_cube_id.to(device=env.device), 0, 2)  # (N,)
     else:
-        # Infer target cube as the one currently assigned to from_slot (nearest in XY).
-        nearest = get_nearest_slot_for_active_cubes_xy(env)  # (N,3)
+        slot_to_active = env.moc_slot_to_active_id
+        row = torch.arange(env.num_envs, device=env.device)
+        target_cube_id = slot_to_active[row, from_idx]
+        # # Infer target cube as the one currently assigned to from_slot (nearest in XY).
+        # nearest = get_nearest_slot_for_active_cubes_xy(env)  # (N,3)
 
-        match = (nearest == from_idx.unsqueeze(1))     # (N,3)
-        has_match = match.any(dim=1)                   # (N,)
-        first_match_id = match.to(torch.int64).argmax(dim=1)
+        # match = (nearest == from_idx.unsqueeze(1))     # (N,3)
+        # has_match = match.any(dim=1)                   # (N,)
+        # first_match_id = match.to(torch.int64).argmax(dim=1)
 
-        from_slot_xy = slots[torch.arange(env.num_envs, device=env.device), from_idx, :2]  # (N,2)
-        dxy = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)                                # (N,3,2)
-        dist2 = (dxy * dxy).sum(dim=-1)                                                      # (N,3)
-        fallback_id = dist2.argmin(dim=1)                                                    # (N,)
+        # from_slot_xy = slots[torch.arange(env.num_envs, device=env.device), from_idx, :2]  # (N,2)
+        # dxy = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)                                # (N,3,2)
+        # dist2 = (dxy * dxy).sum(dim=-1)                                                      # (N,3)
+        # fallback_id = dist2.argmin(dim=1)                                                    # (N,)
 
-        target_cube_id = torch.where(has_match, first_match_id, fallback_id)                 # (N,)
+        # target_cube_id = torch.where(has_match, first_match_id, fallback_id)                 # (N,)
 
     # --- Check target cube near to_slot ---
     target_pos = cubes_pos[torch.arange(env.num_envs, device=env.device), target_cube_id, :]  # (N,3)

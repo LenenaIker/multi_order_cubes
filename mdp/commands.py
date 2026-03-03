@@ -69,14 +69,16 @@ def ensure_command_buffers(env: ManagerBasedRLEnv) -> None:
         env.moc_cmd_stamp = -torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
 
 
-# def ensure_phase_buffers(env: ManagerBasedRLEnv) -> None:
-#     """Buffers for the phase machine."""
-#     if not hasattr(env, "moc_phase") or env.moc_phase is None:
-#         env.moc_phase = torch.ones((env.num_envs,), dtype=torch.int32, device=env.device)
-#     if not hasattr(env, "moc_phase_hold") or env.moc_phase_hold is None:
-#         env.moc_phase_hold = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
-#     if not hasattr(env, "moc_prev_ep_len") or env.moc_prev_ep_len is None:
-#         env.moc_prev_ep_len = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
+def ensure_slot_mapping_buffers(env):
+    if not hasattr(env, "moc_active_cube_slot_idx") or env.moc_active_cube_slot_idx is None:
+        env.moc_active_cube_slot_idx = torch.zeros(
+            (env.num_envs, 3), dtype=torch.long, device=env.device
+        )
+
+    if not hasattr(env, "moc_slot_to_active_id") or env.moc_slot_to_active_id is None:
+        env.moc_slot_to_active_id = -torch.ones(
+            (env.num_envs, 4), dtype=torch.long, device=env.device
+        )
 
 
 def ensure_next_buffers_light(env: ManagerBasedRLEnv) -> None:
@@ -96,56 +98,28 @@ def ensure_moc_buffers(env: "ManagerBasedRLEnv") -> None:
 # Command latching / sampling
 # -----------------------------------------------------------------------------
 
-def latch_command_state(env: ManagerBasedRLEnv, env_ids: torch.Tensor | None = None) -> None:
-    """Latch per-command auxiliary state without resampling the command."""
+def latch_command_state(env, env_ids=None):
     ensure_command_buffers(env)
-    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        rid = int(getattr(env, "_moc_reset_id", 0))
-        raise RuntimeError(
-            f"[MOC] latch_command_state without active_cube_indices (reset_id={rid})"
-        )
+    ensure_slot_mapping_buffers(env)
+
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
-    else:
-        env_ids = env_ids.to(device=env.device)
-        if env_ids.numel() == 0:
-            return
 
     cmd = env.command_from_to.index_select(0, env_ids)
-    from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)  # (M,)
+    from_idx = torch.clamp(cmd[:, 0] - 1, 0, 3)  # 0-based slot index
 
-    cubes_pos = active_cube_positions_w(env, env_ids=env_ids)  # (M,3,3)
-    
-    
-    rid = int(getattr(env, "_moc_reset_id", 0))
-    if rid > 0:
-        per_env_abs = cubes_pos.abs().sum(dim=(1, 2))
-        bad = (per_env_abs == 0.0)
-        if bad.any():
-            bad_ids = env_ids[bad].detach().cpu().tolist()
-            raise RuntimeError(
-                f"[MOC] Zero cube positions for env_ids={bad_ids} (reset_id={rid})"
-            )
-    
-    
-    slots = slots_w(env, env_ids=env_ids)                      # (M,4,3)
+    slot_to_active = env.moc_slot_to_active_id.index_select(0, env_ids)
 
-    nearest = nearest_slot_for_active_cubes_xy(env).index_select(0, env_ids)  # (M,3)
-    match = (nearest == from_idx.unsqueeze(1))                                # (M,3)
-    has_match = match.any(dim=1)                                              # (M,)
-    first_match_id = match.to(torch.int64).argmax(dim=1)                      # (M,)
+    row = torch.arange(env_ids.numel(), device=env.device)
+    target_id = slot_to_active[row, from_idx]
 
-    from_slot_xy = slots[torch.arange(env_ids.numel(), device=env.device), from_idx, :2]  # (M,2)
-    dxy = cubes_pos[:, :, :2] - from_slot_xy.unsqueeze(1)                                 # (M,3,2)
-    dist2_from = (dxy * dxy).sum(dim=-1)                                                   # (M,3)
-    fallback_id = dist2_from.argmin(dim=1)                                                 # (M,)
-
-    target_id = torch.where(has_match, first_match_id, fallback_id)                        # (M,)
+    if (target_id < 0).any():
+        bad = env_ids[(target_id < 0)].detach().cpu().tolist()
+        raise RuntimeError(
+            f"[MOC] latch_command_state: from_slot empty for env_ids={bad}"
+        )
 
     env.target_cube_id[env_ids] = target_id
-    env.moc_cmd_cube_pos_xy0[env_ids] = cubes_pos[:, :, :2]
-    if hasattr(env, "episode_length_buf"):
-        env.moc_cmd_stamp[env_ids] = env.episode_length_buf[env_ids]
 
 
 def set_command_from_to(env: ManagerBasedRLEnv, from_slot_1based: int, to_slot_1based: int):
@@ -164,6 +138,7 @@ def sample_command_from_to(
     """Vectorized sampling of (from,to) per-env, supports partial update with env_ids."""
     assert num_slots == 4, "This implementation assumes 4 slots"
     ensure_command_buffers(env)
+    ensure_slot_mapping_buffers(env)
 
     if env_ids is None:
         env_ids = torch.arange(env.num_envs, device=env.device)
@@ -172,13 +147,8 @@ def sample_command_from_to(
         if env_ids.numel() == 0:
             return env.command_from_to
 
-    nearest_all = nearest_slot_for_active_cubes_xy(env)          # (N,3)
-    nearest = nearest_all.index_select(0, env_ids)               # (M,3)
-    M = int(env_ids.numel())
-
-    # occupancy multi-hot (M,4)
-    occ = torch.zeros((M, num_slots), dtype=torch.bool, device=env.device)
-    occ.scatter_(1, nearest, True)
+    slot_to_active = env.moc_slot_to_active_id.index_select(0, env_ids)
+    occ = (slot_to_active >= 0)
     empty = ~occ
 
     # sample FROM among occupied

@@ -73,8 +73,12 @@ def _active_cube_positions_w(env: ManagerBasedRLEnv) -> torch.Tensor:
     idx = env.active_cube_indices  # (N,3)
     return pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (N,3,3)
 
-def cubes_slot_occupancy_onehot(env: ManagerBasedRLEnv, num_slots: int = 4) -> torch.Tensor:
-    nearest = get_nearest_slot_for_active_cubes_xy(env, num_slots=num_slots)  # (N,3)
+def cubes_slot_occupancy_onehot(env, num_slots: int = 4):
+    if hasattr(env, "moc_slot_to_active_id") and env.moc_slot_to_active_id is not None:
+        return (env.moc_slot_to_active_id >= 0).to(torch.float32)
+
+    # Fallback legacy
+    nearest = get_nearest_slot_for_active_cubes_xy(env, num_slots=num_slots)
     occ = torch.zeros((env.num_envs, num_slots), dtype=torch.float32, device=env.device)
     occ.scatter_(1, nearest, 1.0)
     return occ

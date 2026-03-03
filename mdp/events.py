@@ -85,6 +85,31 @@ def randomize_cubes_on_slots(env, env_ids):
         env.active_cube_indices = torch.zeros((env.num_envs, 3), dtype=torch.long, device=device)
     env.active_cube_indices[env_ids] = active_idx
 
+    # ------------------------------------------------------------------
+    # Deterministic slot <-> active mapping (single source of truth)
+    # ------------------------------------------------------------------
+    if not hasattr(env, "moc_active_cube_slot_idx") or env.moc_active_cube_slot_idx is None:
+        env.moc_active_cube_slot_idx = torch.zeros(
+            (env.num_envs, 3), dtype=torch.long, device=device
+        )
+
+    if not hasattr(env, "moc_slot_to_active_id") or env.moc_slot_to_active_id is None:
+        env.moc_slot_to_active_id = -torch.ones(
+            (env.num_envs, 4), dtype=torch.long, device=device
+        )
+
+    # Each column of perm_slots corresponds to active_id 0..2
+    env.moc_active_cube_slot_idx[env_ids] = perm_slots.to(torch.long)
+
+    # Reset slot_to_active_id for these envs
+    env.moc_slot_to_active_id[env_ids] = -1
+
+    # Fill slot_to_active_id
+    M = env_ids.numel()
+    for k in range(3):  # active_id = 0..2
+        slot_k = perm_slots[:, k].to(torch.long)
+        env.moc_slot_to_active_id[env_ids, slot_k] = k
+
     # --- Ensure target cube id exists and is valid (fallback) ---
     if not hasattr(env, "target_cube_id") or env.target_cube_id is None:
         env.target_cube_id = torch.zeros((env.num_envs,), dtype=torch.long, device=device)

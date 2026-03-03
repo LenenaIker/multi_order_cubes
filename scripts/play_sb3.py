@@ -38,9 +38,12 @@ def main():
     model = SAC.load(args.checkpoint, env=env, device="cuda" if "cuda" in str(args.device).lower() else "cpu")
 
     obs = env.reset()
-    for _ in range(int(args.steps)):
+    for i in range(int(args.steps)):
         action, _ = model.predict(obs, deterministic=True)
         obs, rewards, dones, infos = env.step(action)
+        
+        if i % 20 == 0:
+            print(rewards)
 
     env.close()
     simulation_app.close()

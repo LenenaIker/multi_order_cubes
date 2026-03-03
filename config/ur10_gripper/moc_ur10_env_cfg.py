@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import os
 
-from isaaclab.assets import RigidObjectCfg, SurfaceGripperCfg
+from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs.mdp.actions import JointPositionActionCfg
-from isaaclab.envs.mdp.actions.actions_cfg import SurfaceGripperBinaryActionCfg
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 
-from isaaclab_assets.robots.universal_robots import UR10_LONG_SUCTION_CFG  # type: ignore
+from isaaclab_assets.robots.universal_robots import UR10e_ROBOTIQ_GRIPPER_CFG  # type: ignore
 
 from ...moc_env_cfg import MOCEnvCfg, ObjectTableSceneCfg
 from ... import mdp
@@ -139,14 +138,7 @@ class UR10LongSuctionMOCSceneCfg(ObjectTableSceneCfg):
         ),
     )
 
-    surface_gripper: SurfaceGripperCfg = SurfaceGripperCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/ee_link/SurfaceGripper",
-        max_grip_distance=0.02, # 2 cm
-        retry_interval=0.0, # reintenta sin esperar (evita misses por sincronía con control)
-        # Mantén fuerzas altas, interesa que aguante transporte
-        shear_force_limit=5000.0,
-        coaxial_force_limit=5000.0,
-    )
+
     
 
 @configclass
@@ -157,7 +149,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
     """
 
     scene: UR10LongSuctionMOCSceneCfg = UR10LongSuctionMOCSceneCfg(
-        num_envs=1,
+        num_envs=64,
         env_spacing=2.5,
         replicate_physics=False,
     )
@@ -178,24 +170,21 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         for name in cube_names:
             getattr(self.scene, name).init_state.pos = parked_pos
 
-        # Suction grippers currently require CPU simulation
-        self.device = "cpu"
 
         # Robot
-        self.scene.robot = UR10_LONG_SUCTION_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+        self.scene.robot = UR10e_ROBOTIQ_GRIPPER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
         # End-effector frame transformer (TIP via offset from ee_link rigid body)
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/base_link",
-            debug_vis=True,
+            debug_vis=False,  # temporal para calibrar
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
-                    prim_path="{ENV_REGEX_NS}/Robot/ee_link",   # rigid body OK
+                    prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
                     name="tip",
                     offset=OffsetCfg(
-                        # Offset ee_link -> Tip
-                        pos=[0.21282, 0.0, 0.0],
-                        # rot=[1.0, 0.0, 0.0, 0.0], # identity (w,x,y,z)
+                        pos=[0.0, 0.0, 0.12],
+                        #rot=[0.0, 0.0, 0.70710678, 0.70710678],  # +90° sobre Z
                     ),
                 ),
             ],
@@ -204,16 +193,26 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         # Actions
         self.actions.arm_action = JointPositionActionCfg(
             asset_name="robot",
-            joint_names=[".*_joint"],
+            joint_names=[
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
             scale=0.5,
             use_default_offset=True,
         )
 
-        self.actions.gripper_action = SurfaceGripperBinaryActionCfg(
-            asset_name="surface_gripper",
-            open_command=-1.0,
-            close_command=1.0,
+        self.actions.gripper = JointPositionActionCfg(
+            asset_name="robot",
+            joint_names=["finger_joint"],
+            scale=0.8,
+            use_default_offset=False,
         )
+        # Robotiq: controla/observa el dedo principal
+        gripper_joint_names = ["finger_joint"]
 
         # NEXT action
         self.actions.next_action = mdp.NextFlagActionCfg(asset_name="robot")

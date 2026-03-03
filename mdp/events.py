@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 import torch
 
 from .constants import CUBE_KEYS_9
-from .commands import sample_command_from_to
+from .commands import sample_command_from_to, latch_command_state
 
 
 
@@ -25,6 +25,7 @@ def sample_from_to_on_reset(env: "ManagerBasedRLEnv", env_ids=None):
 
     # One-shot sampling (no retries). Command validity is by construction.
     sample_command_from_to(env, env_ids=env_ids)
+    latch_command_state(env, env_ids)
 
 
 def _maybe_set_visibility(cube, visible: bool, env_ids: torch.Tensor):
@@ -83,6 +84,13 @@ def randomize_cubes_on_slots(env, env_ids):
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
         env.active_cube_indices = torch.zeros((env.num_envs, 3), dtype=torch.long, device=device)
     env.active_cube_indices[env_ids] = active_idx
+
+    # --- Ensure target cube id exists and is valid (fallback) ---
+    if not hasattr(env, "target_cube_id") or env.target_cube_id is None:
+        env.target_cube_id = torch.zeros((env.num_envs,), dtype=torch.long, device=device)
+
+    # Default to first active cube (index 0 within active set) for these envs
+    env.target_cube_id[env_ids] = 0
 
     # -------------------------
     # apply: activate selected 3 (place on slots), park other 6

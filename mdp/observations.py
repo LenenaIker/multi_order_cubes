@@ -130,26 +130,20 @@ def cubes_poses_in_base_frame(env: ManagerBasedRLEnv, robot_cfg: SceneEntityCfg 
 
 
 def gripper_state(
-    env: ManagerBasedRLEnv,
+    env: "ManagerBasedRLEnv",
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """
-    Minimal gripper observation:
-      - suction: state (N,1) in {-1,0,1} typically
-      - parallel: (N,2) finger positions (as in stack)
+    Robotiq 1-DOF gripper observation:
+      - finger_joint position (N,1)
     """
     robot: Articulation = env.scene[robot_cfg.name]
 
-    if hasattr(env.scene, "surface_grippers") and len(env.scene.surface_grippers) > 0:
-        # assume one surface gripper named "surface_gripper"
-        sg = env.scene.surface_grippers["surface_gripper"]
-        return sg.state.view(-1, 1).to(torch.float32)
+    joint_names = getattr(env.cfg, "gripper_joint_names", ["finger_joint"])
+    joint_ids, _ = robot.find_joints(joint_names)
 
-    # parallel gripper fallback (requires env.cfg.gripper_joint_names)
-    gripper_joint_ids, _ = robot.find_joints(env.cfg.gripper_joint_names)
-    finger_1 = robot.data.joint_pos[:, gripper_joint_ids[0]].clone().unsqueeze(1)
-    finger_2 = (-1.0 * robot.data.joint_pos[:, gripper_joint_ids[1]].clone()).unsqueeze(1)
-    return torch.cat([finger_1, finger_2], dim=1)
+    finger_q = robot.data.joint_pos[:, joint_ids[0]].to(torch.float32).unsqueeze(1)
+    return finger_q
 
 
 def stable_success_hint(env: "ManagerBasedRLEnv") -> torch.Tensor:
@@ -180,24 +174,6 @@ def moc_phase_obs(env: "ManagerBasedRLEnv") -> torch.Tensor:
         p = env.moc_phase.to(torch.float32).clamp(1, 5)
         return ((p - 1.0) / 4.0).view(-1, 1)
     return torch.zeros((env.num_envs, 1), dtype=torch.float32, device=env.device)
-
-
-def suction_cmd_on_obs(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """
-    (N,2): [suction_cmd, suction_on] if available, else zeros.
-    """
-    cmd = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
-    on = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
-
-    # suction_cmd: from last action if your action term stores it, else 0
-    if hasattr(env, "moc_last_suction_cmd") and env.moc_last_suction_cmd is not None:
-        cmd = env.moc_last_suction_cmd.to(torch.float32)
-
-    # suction_on: if you track attachment state somewhere
-    if hasattr(env, "moc_suction_on") and env.moc_suction_on is not None:
-        on = env.moc_suction_on.to(torch.float32)
-
-    return torch.stack([cmd, on], dim=1)
 
 
 
@@ -231,7 +207,6 @@ def policy_obs(
         gripper_state(env, robot_cfg),
         stable_success_hint(env),
         moc_phase_obs(env),
-        suction_cmd_on_obs(env),
         next_cooldown_obs(env),
     ]
     return torch.cat(obs, dim=1)

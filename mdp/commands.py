@@ -69,14 +69,14 @@ def ensure_command_buffers(env: ManagerBasedRLEnv) -> None:
         env.moc_cmd_stamp = -torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
 
 
-def ensure_phase_buffers(env: ManagerBasedRLEnv) -> None:
-    """Buffers for the phase machine."""
-    if not hasattr(env, "moc_phase") or env.moc_phase is None:
-        env.moc_phase = torch.ones((env.num_envs,), dtype=torch.int32, device=env.device)
-    if not hasattr(env, "moc_phase_hold") or env.moc_phase_hold is None:
-        env.moc_phase_hold = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
-    if not hasattr(env, "moc_prev_ep_len") or env.moc_prev_ep_len is None:
-        env.moc_prev_ep_len = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
+# def ensure_phase_buffers(env: ManagerBasedRLEnv) -> None:
+#     """Buffers for the phase machine."""
+#     if not hasattr(env, "moc_phase") or env.moc_phase is None:
+#         env.moc_phase = torch.ones((env.num_envs,), dtype=torch.int32, device=env.device)
+#     if not hasattr(env, "moc_phase_hold") or env.moc_phase_hold is None:
+#         env.moc_phase_hold = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
+#     if not hasattr(env, "moc_prev_ep_len") or env.moc_prev_ep_len is None:
+#         env.moc_prev_ep_len = torch.zeros((env.num_envs,), dtype=torch.int32, device=env.device)
 
 
 def ensure_next_buffers_light(env: ManagerBasedRLEnv) -> None:
@@ -85,10 +85,10 @@ def ensure_next_buffers_light(env: ManagerBasedRLEnv) -> None:
         env.moc_next_prev = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
 
 
-def ensure_moc_buffers(env: ManagerBasedRLEnv) -> None:
-    """Backwards-compatible wrapper."""
+# --- REPLACE in mdp/commands.py ---
+def ensure_moc_buffers(env: "ManagerBasedRLEnv") -> None:
+    """Minimal buffers needed by MOC (no phase machine)."""
     ensure_command_buffers(env)
-    ensure_phase_buffers(env)
     ensure_next_buffers_light(env)
 
 

@@ -97,16 +97,28 @@ def get_cube_quat9_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
 
 def get_active_cube_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     """(N,3,3) positions for active cubes only."""
+        # Cold-start: ObservationManager llama a obs antes de reset().
+    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
+        # Si aún no hubo ningún reset, devolvemos ceros para inferir dims.
+        if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None or env._moc_reset_id == 0:
+            N = int(getattr(env, "num_envs", 1))
+            device = getattr(env, "device", "cpu")
+            return torch.zeros((N, 3, 3), dtype=torch.float32, device=device)
+
+        # Si ya hubo reset y sigue faltando -> bug real
+        raise RuntimeError(
+            "active_cube_indices is not set after reset. randomize_cubes_on_slots didn't run."
+        )
+    
     _invalidate_if_needed(env)
     key = "active_pos_w"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    # During env initialization, ObservationManager may call obs fns before reset events ran.
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        N = int(getattr(env, "num_envs", 1))
-        device = getattr(env, "device", "cpu")
-        return torch.zeros((N, 3, 3), dtype=torch.float32, device=device)
+        raise RuntimeError(
+            "active_cube_indices is not set. randomize_cubes_on_slots likely didn't run before rewards/obs."
+        )
 
     pos9 = get_cube_pos9_w(env)  # (N,9,3)
     idx = env.active_cube_indices  # (N,3)

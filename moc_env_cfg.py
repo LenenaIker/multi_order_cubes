@@ -16,6 +16,7 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransf
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.envs.mdp.actions import JointPositionActionCfg
 
 from . import mdp
 
@@ -55,16 +56,9 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
 ##
 @configclass
 class ActionsCfg:
-    """Action specifications for the MDP."""
-
-    # arm_action: mdp.JointPositionActionCfg = MISSING
-    # gripper_action: mdp.BinaryJointPositionActionCfg = MISSING
-
-    # NEW: scalar action used as NEXT "commit" signal
-    # If you implement NextFlagActionCfg (see below), you can add it here.
-    # If not, you can omit this and set env.moc_next_signal yourself in your env wrapper.
-    # next_action: mdp.NextFlagActionCfg = MISSING
-    pass
+    arm_action: JointPositionActionCfg = MISSING
+    gripper: JointPositionActionCfg = MISSING
+    next_action: mdp.NextFlagActionCfg = MISSING
 
 
 @configclass
@@ -95,178 +89,91 @@ class TerminationsCfg:
     
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
-    cube_fell_off_table = DoneTerm(
-        func=mdp.cube_fell_off_table,
-        params=dict(
-            z_margin_below_slots=0.15,
-            xy_margin=0.35,
-        ),
-    )
-
-    ee_below_table = DoneTerm(
-        func=mdp.ee_below_table,
-        params=dict(
-            table_z=0.0199,
-            z_margin_below_slots=0.002
-        )
-    )
-
+    # cube_fell_off_table = DoneTerm(
+    #     func=mdp.cube_fell_off_table,
+    #     params=dict(
+    #         z_margin_below_slots=0.15,
+    #         xy_margin=0.35,
+    #     ),
+    # )
 
 
 @configclass
 class RewardsCfg:
-    # Dense shaping: move EE towards the target cube
-    ee_to_target_xy = RewTerm(
-        func=mdp.reward_shaping_ee_to_target_xy,
-        weight=1.0,
-        params=dict(
-            sigma_xy=0.15,
-            scale=1.0,
-        ),
-    )
-    
-    # Dense shaping 3D: EE towards a pregrasp point above target cube
-    ee_to_target_pregrasp = RewTerm(
-        func=mdp.reward_shaping_ee_to_target_pregrasp,
-        weight=0.5,  # pequeño, no debe dominar
-        params=dict(
-            sigma=0.20,
-            scale=1.0,
-            z_offset=0.08,
-        ),
+    # 1) Reach: tip -> punto pregrasp sobre cubo target
+    tip_to_target_xy = RewTerm(
+        func=mdp.reward_tip_to_target_xy,
+        weight=20.0,
+        params=dict(sigma_xy=0.35),
     )
 
-    # Dense shaping: move target cube towards the commanded to_slot
-    target_to_to_slot_xy = RewTerm(
-        func=mdp.reward_shaping_target_to_to_slot_xy_gated_by_suction,
-        weight=2.0,
-        params=dict(sigma=0.20, scale=1.0),
+    # 1b) Reach Z: tip -> cubo target en Z (siempre)
+    tip_to_target_z = RewTerm(
+        func=mdp.reward_tip_to_target_z,
+        weight=3.0,
+        params=dict(z_offset=0.10, sigma_z=0.30),
     )
 
-    # Penalize disturbing non-target cubes (reduces pushing/bulldozing behavior)
-    # Keep this BEFORE next_commit_success so its baseline uses the *current* command.
-    disturb_other_cubes = RewTerm(
-        func=mdp.reward_penalty_disturb_other_cubes,
-        weight=0.1,
+    close_cmd_in_zone = RewTerm(
+        func=mdp.reward_close_cmd_in_grasp_zone,
+        weight=0.0,#2.0,
+        params=dict(radius_xy=0.04, z_lo=-0.01, z_hi=0.03),
+    )
+
+    close_cmd_outside_penalty = RewTerm(
+        func=mdp.penalty_close_cmd_outside_grasp_zone,
+        weight=0.0,#1.0,
+        params=dict(radius_xy=0.06, z_lo=-0.02, z_hi=0.05),
+    )
+
+    # 2) Lift: Z del cubo (gated por suction_on)
+    lift_target = RewTerm(
+        func=mdp.reward_lift_target_z,
+        weight=0.0,#10.0,
         params=dict(
-            lambda_disturb=0.25,
-            tol_xy=0.01,
+            z_lift_min=0.02,
+            z_lift_max=0.12,
         ),
     )
 
-    # far_from_target_penalty = RewTerm(
-    #     func=mdp.reward_penalty_far_from_target,
-    #     weight=1.0,
-    #     params=dict(
-    #         sigma=0.2,
-    #         lambda_far=0.5,
-    #     ),
-    # )
-
-    dist_xy_l2_penalty = RewTerm(
-        func=mdp.reward_penalty_dist_xy_l2,
-        weight=1.0,
+    # 3) Transport: cubo -> slot destino (XY), gated por suction_on + lifted
+    move_target_to_goal_xy = RewTerm(
+        func=mdp.reward_move_target_to_goal_xy,
+        weight=0.0,#12.0,
         params=dict(
-            sigma_xy=0.25,
-            scale=1.0,
+            sigma_xy=0.12,
+            z_lift_gate=0.02,
         ),
     )
 
-    # 3D pregrasp shaping (tip-centric)
-    ee_to_target_pregrasp_3d = RewTerm(
-        func=mdp.reward_shaping_ee_to_target_pregrasp_3d,
-        weight=1.0,
-        params=dict(
-            sigma=0.20,
-            scale=1.0,
-            z_offset=0.08,
-        ),
-    )
-
-    # Reward using suction when close to target (tool usage)
-    suction_near_target = RewTerm(
-        func=mdp.reward_suction_near_target,
-        weight=1,
-        params=dict(
-            sigma=0.08,
-            # Reduce "hover" reward
-            scale_proximity=0.5,
-            # Make "try suction correctly" very attractive
-            scale_bonus_if_suction_cmd=4.0,
-            scale_bonus_if_suction_on=4.0,
-            # Alignment shaping (X+ should point to world up)
-            scale_align=2.0,
-            align_power=4.0,
-        )
-    )
-        
-    # Reward lifting target once suction is active
-    lift_target_when_suction = RewTerm(
-        func=mdp.reward_lift_target_when_suction,
-        weight=4.0,
-        params=dict(
-            z_lift_min=0.03,
-            z_lift_max=0.15,
-            scale=1.0,
-        ),
-    )
-
-    next_by_phase = RewTerm(
-        func=mdp.reward_next_by_phase,
-        weight=1.0,
+    # 4) NEXT: commit cuando la tarea está establemente completada
+    next_commit = RewTerm(
+        func=mdp.reward_next_commit,
+        weight=0.0,#1.0,
         params=dict(
             tau=0.0,
-            cooldown_steps=30,
-            R_next_ok=8.0,
-            R_next_bad=3.0,
-            advance_command=True,
+            stable_window=6,
+            cooldown_steps=40,
+            
+            R_next_ok=15.0,
+            R_next_bad=0.2,
+            R_wait=0.01,
+
+            tol_xy=0.03,
+            tol_z=0.05,
+            require_to_clear=True,
+            require_settled=True,
+            vel_tol=0.25,
         ),
     )
 
+    # Penalización suave para estabilidad
     joint_vel_penalty = RewTerm(
         func=mdp.reward_penalty_joint_vel,
-        weight=0.07,
-        params=dict(lambda_vel=0.01),
+        weight=0.002,
+        params=dict(lambda_vel=0.003),
     )
 
-    # Atracción fuerte y suave (reach-style)
-    reach_xy = RewTerm(
-        func=mdp.reward_reach_xy_tanh,
-        weight=2.0,
-        params=dict(std_xy=0.25),
-    )
-
-    reach_3d = RewTerm(
-        func=mdp.reward_reach_3d_tanh,
-        weight=1.0,
-        params=dict(std_3d=0.35),
-    )
-
-    # Empuja a BAJAR a la altura de grasp (clave para llegar a contacto)
-    grasp_height = RewTerm(
-        func=mdp.reward_grasp_height_tanh,
-        weight=2.0,
-        params=dict(grasp_z_offset=0.03, std_z=0.06),
-    )
-
-    # Succión solo cuando estás en zona de grasp (y penaliza fuera)
-    suction_cmd_gated = RewTerm(
-        func=mdp.reward_suction_cmd_gated,
-        weight=3.0,
-        params=dict(gain=1.0, xy_tol=0.04, z_tol=0.05, grasp_z_offset=0.03),
-    )
-
-    suction_cmd_outside_penalty = RewTerm(
-        func=mdp.penalty_suction_cmd_outside,
-        weight=1.0,
-        params=dict(penalty=0.2, xy_tol=0.06, z_tol=0.07, grasp_z_offset=0.03),
-    )
-
-    moc_metrics_logger = RewTerm(
-        func=mdp.reward_log_metrics,
-        weight=0.0,
-        params={},
-    )
 
 
 @configclass

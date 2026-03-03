@@ -208,7 +208,7 @@ def main():
 
     # Optional: normalize obs/reward (often helps for SAC with dense shaping)
     if not args.no_vecnormalize:
-        sb3_env = VecNormalize(sb3_env, norm_obs=True, norm_reward=True, clip_obs=10.0)
+        sb3_env = VecNormalize(sb3_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     # ---- agent cfg
     # Resolve YAML path relative to this script if needed

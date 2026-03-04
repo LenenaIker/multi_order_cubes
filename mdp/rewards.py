@@ -10,6 +10,7 @@ from .terminations import move_success
 from .commands import ensure_command_buffer, ensure_moc_buffers
 from .step_cache import get_active_cube_pos_w, get_slots_w, get_tcp_pos_w
 
+
 # -----------------------------------------------------------------------------
 # Basic geometry helpers
 # -----------------------------------------------------------------------------
@@ -361,8 +362,6 @@ def reward_move_target_to_goal_xy(
     return gate * base
 
 
-
-# --- REPLACE in mdp/rewards.py ---
 def reward_close_cmd_in_grasp_zone(
     env: "ManagerBasedRLEnv",
     radius_xy: float = 0.04,
@@ -492,3 +491,145 @@ def reward_penalty_joint_vel(env: "ManagerBasedRLEnv", lambda_vel: float = 0.01)
     robot = env.scene["robot"]
     qd = robot.data.joint_vel
     return -float(lambda_vel) * torch.sum(qd * qd, dim=-1)
+
+
+
+
+
+
+
+def _safe_norm(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    return torch.sqrt(torch.sum(x * x, dim=-1) + eps)
+
+
+def _smooth_gate(d: torch.Tensor, d_on: float, band: float) -> torch.Tensor:
+    """
+    Smooth gate ~1 when d <= d_on, ~0 when d >> d_on.
+    Implemented as sigmoid((d_on - d)/band).
+    """
+    b = float(max(1e-6, band))
+    return torch.sigmoid((float(d_on) - d) / b)
+
+def reward_reach_xy_rational(
+    env: "ManagerBasedRLEnv",
+    k_xy: float = 0.10,     # “radio” de caída (m)
+    p: float = 1.0,         # potencia opcional
+) -> torch.Tensor:
+    """
+    r = 1 / (1 + (dxy/k)^p)
+    - No satura tan rápido como exp(-d^2)
+    - Gradiente útil lejos
+    """
+    ensure_command_buffer(env)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
+    cube = get_target_cube_pos_w(env)
+
+    dxy = tip[:, :2] - cube[:, :2]
+    dist_xy = _safe_norm(dxy)
+
+    k = float(max(1e-6, k_xy))
+    pp = float(max(1e-3, p))
+    r = 1.0 / (1.0 + torch.pow(dist_xy / k, pp))
+
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras["moc/reach_dist_xy"] = dist_xy
+    return r
+
+
+def reward_reach_xy_progress(
+    env: "ManagerBasedRLEnv",
+    scale: float = 1.0,     # ganancia del progreso
+    clip: float = 0.02,     # clip en metros por step (evita explosiones)
+) -> torch.Tensor:
+    """
+    r = scale * clip(d_prev - d_now, [-clip, clip])
+    - quieto => ~0
+    - acercarse => positivo
+    - alejarse => negativo
+    """
+    ensure_command_buffer(env)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
+    cube = get_target_cube_pos_w(env)
+
+    dxy = tip[:, :2] - cube[:, :2]
+    dist_xy = _safe_norm(dxy)
+
+    # init buffers
+    if not hasattr(env, "_moc_prev_dist_xy") or env._moc_prev_dist_xy is None:
+        env._moc_prev_dist_xy = dist_xy.detach()
+
+    prev = env._moc_prev_dist_xy
+    # si hay reset_buf, igualamos prev=dist para no dar reward artificial
+    if hasattr(env, "reset_buf") and env.reset_buf is not None:
+        rb = env.reset_buf.to(dtype=torch.bool)
+        prev = torch.where(rb, dist_xy.detach(), prev)
+
+    delta = (prev - dist_xy)  # positivo si se acerca
+    c = float(max(1e-6, clip))
+    delta = torch.clamp(delta, -c, c)
+
+    # update prev
+    env._moc_prev_dist_xy = dist_xy.detach()
+
+    r = float(scale) * delta
+
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras["moc/reach_delta_xy"] = r
+    return r
+
+def reward_reach_z_gated(
+    env: "ManagerBasedRLEnv",
+    z_offset: float = 0.10,
+    sigma_z: float = 0.06,
+    gate_dxy: float = 0.18,     # <- más grande que antes
+    gate_band: float = 0.05,    # <- más suave
+) -> torch.Tensor:
+    ensure_command_buffer(env)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
+    cube = get_target_cube_pos_w(env)
+
+    dxy = tip[:, :2] - cube[:, :2]
+    dist_xy = _safe_norm(dxy)
+
+    dz = tip[:, 2] - (cube[:, 2] + float(z_offset))
+    s = float(max(1e-6, sigma_z))
+    z_rew = torch.exp(-0.5 * (dz * dz) / (s * s))
+
+    b = float(max(1e-6, gate_band))
+    gate = torch.sigmoid((float(gate_dxy) - dist_xy) / b)
+
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras["moc/reach_gate_xy"] = gate
+    env.extras["moc/reach_abs_dz"] = torch.abs(dz)
+
+    return gate * z_rew
+
+
+
+def reward_reach_success_bonus(
+    env: "ManagerBasedRLEnv",
+    tol_xy: float = 0.03,
+    tol_z: float = 0.04,
+    z_offset: float = 0.10,
+    bonus: float = 1.0,
+) -> torch.Tensor:
+    """
+    Sparse-ish but still smooth/controlled: give a bonus when inside a tight box.
+    Helps SAC “lock onto” success and discourages camping elsewhere.
+
+    Output in {0, bonus}.
+    """
+    ensure_command_buffer(env)
+
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
+    cube = get_target_cube_pos_w(env)
+
+    dxy = tip[:, :2] - cube[:, :2]
+    dist_xy = _safe_norm(dxy)
+    dz = tip[:, 2] - (cube[:, 2] + float(z_offset))
+
+    ok = (dist_xy <= float(tol_xy)) & (torch.abs(dz) <= float(tol_z))
+    return ok.to(torch.float32) * float(bonus)

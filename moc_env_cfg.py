@@ -100,67 +100,73 @@ class TerminationsCfg:
 
 @configclass
 class RewardsCfg:
-    tip_to_target_xy = RewTerm(
-        func=mdp.reward_tip_to_target_xy,
-        weight=5.0,#15.0
-        params=dict(sigma_xy=0.7),
+    reach_xy_abs = RewTerm(
+        func=mdp.reward_reach_xy_rational,
+        weight=6.0,
+        params=dict(k_xy=0.12, p=1.0),
     )
 
-    tip_to_target_z = RewTerm(
-        func=mdp.reward_tip_to_target_z,
-        weight=2.0,#6.0
-        params=dict(z_offset=0.10, sigma_z=0.8),
+    reach_xy_progress = RewTerm(
+        func=mdp.reward_reach_xy_progress,
+        weight=20.0,
+        params=dict(scale=1.0, clip=0.02),
     )
 
-    close_cmd_in_zone = RewTerm(
-        func=mdp.reward_close_cmd_in_grasp_zone,
-        weight=0.0,#0.5,
-        params=dict(radius_xy=0.04, z_lo=-0.01, z_hi=0.03),
+    reach_z = RewTerm(
+        func=mdp.reward_reach_z_gated,
+        weight=2.0,
+        params=dict(z_offset=0.10, sigma_z=0.06, gate_dxy=0.18, gate_band=0.05),
     )
 
-    close_cmd_outside_penalty = RewTerm(
-        func=mdp.penalty_close_cmd_outside_grasp_zone,
-        weight=0.0,#0.05,
-        params=dict(radius_xy=0.06, z_lo=-0.02, z_hi=0.05),
-    )
+    # close_cmd_in_zone = RewTerm(
+    #     func=mdp.reward_close_cmd_in_grasp_zone,
+    #     weight=0.0,#0.5,
+    #     params=dict(radius_xy=0.04, z_lo=-0.01, z_hi=0.03),
+    # )
 
-    lift_target = RewTerm(
-        func=mdp.reward_lift_target_z,
-        weight=0.0,#4.0,
-        params=dict(
-            z_lift_min=0.02,
-            z_lift_max=0.12,
-        ),
-    )
+    # close_cmd_outside_penalty = RewTerm(
+    #     func=mdp.penalty_close_cmd_outside_grasp_zone,
+    #     weight=0.0,#0.05,
+    #     params=dict(radius_xy=0.06, z_lo=-0.02, z_hi=0.05),
+    # )
 
-    move_target_to_goal_xy = RewTerm(
-        func=mdp.reward_move_target_to_goal_xy,
-        weight=0.0,#12.0,
-        params=dict(
-            sigma_xy=0.12,
-            z_lift_gate=0.02,
-        ),
-    )
+    # lift_target = RewTerm(
+    #     func=mdp.reward_lift_target_z,
+    #     weight=0.0,#4.0,
+    #     params=dict(
+    #         z_lift_min=0.02,
+    #         z_lift_max=0.12,
+    #     ),
+    # )
 
-    next_commit = RewTerm(
-        func=mdp.reward_next_commit,
-        weight=0.0,#1.0,
-        params=dict(
-            tau=0.0,
-            stable_window=6,
-            cooldown_steps=40,
+    # move_target_to_goal_xy = RewTerm(
+    #     func=mdp.reward_move_target_to_goal_xy,
+    #     weight=0.0,#12.0,
+    #     params=dict(
+    #         sigma_xy=0.12,
+    #         z_lift_gate=0.02,
+    #     ),
+    # )
 
-            R_next_ok=15.0,
-            R_next_bad=0.2,
-            R_wait=0.01,
+    # next_commit = RewTerm(
+    #     func=mdp.reward_next_commit,
+    #     weight=0.0,#1.0,
+    #     params=dict(
+    #         tau=0.0,
+    #         stable_window=6,
+    #         cooldown_steps=40,
 
-            tol_xy=0.03,
-            tol_z=0.05,
-            require_to_clear=True,
-            require_settled=True,
-            vel_tol=0.25,
-        ),
-    )
+    #         R_next_ok=15.0,
+    #         R_next_bad=0.2,
+    #         R_wait=0.01,
+
+    #         tol_xy=0.03,
+    #         tol_z=0.05,
+    #         require_to_clear=True,
+    #         require_settled=True,
+    #         vel_tol=0.25,
+    #     ),
+    # )
 
     # joint_vel_penalty = RewTerm(
     #     func=mdp.reward_penalty_joint_vel,

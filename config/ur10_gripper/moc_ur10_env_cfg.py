@@ -192,7 +192,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
         self.scene.ee_frame = FrameTransformerCfg(
             # anchor on a rigid body
             prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
-            debug_vis=True,
+            debug_vis=False,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
                     prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",

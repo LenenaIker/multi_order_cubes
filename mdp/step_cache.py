@@ -166,3 +166,75 @@ def get_nearest_slot_for_active_cubes_xy(env: "ManagerBasedRLEnv", num_slots: in
 
     env._moc_cache[key] = nearest
     return nearest
+
+
+# =========================
+# TCP (midpoint) utilities
+# =========================
+
+def get_tcp_pos_w(env: "ManagerBasedRLEnv", ee_frame_name: str = "ee_frame") -> torch.Tensor:
+    """(N,3) TCP position in world. Midpoint of ['left_tip','right_tip'] if available."""
+    _invalidate_if_needed(env)
+    key = f"tcp_pos_w:{ee_frame_name}"
+    if key in env._moc_cache:
+        return env._moc_cache[key]
+
+    tf = env.scene[ee_frame_name].data.target_pos_w  # (N,2,3) in your setup
+    if tf.ndim == 3 and tf.shape[1] >= 2:
+        pos = 0.5 * (tf[:, 0, :] + tf[:, 1, :])
+    else:
+        pos = tf[:, 0, :]
+
+    env._moc_cache[key] = pos
+    return pos
+
+
+def _quat_hemisphere_align(q: torch.Tensor, q_ref: torch.Tensor) -> torch.Tensor:
+    """Align quaternion sign to reference hemisphere. q,q_ref: (N,4)."""
+    dot = torch.sum(q * q_ref, dim=-1, keepdim=True)
+    return torch.where(dot < 0.0, -q, q)
+
+
+def get_tcp_quat_w(
+    env: "ManagerBasedRLEnv",
+    ee_frame_name: str = "ee_frame",
+    mode: str = "avg",
+) -> torch.Tensor:
+    """(N,4) TCP orientation in world.
+
+    mode:
+      - 'left'  -> quat of target 0
+      - 'right' -> quat of target 1
+      - 'avg'   -> hemisphere-align + normalize(q0 + q1)
+    """
+    _invalidate_if_needed(env)
+    key = f"tcp_quat_w:{ee_frame_name}:{mode}"
+    if key in env._moc_cache:
+        return env._moc_cache[key]
+
+    tq = env.scene[ee_frame_name].data.target_quat_w  # (N,2,4)
+    if tq.ndim == 3 and tq.shape[1] >= 2:
+        q0 = tq[:, 0, :]
+        q1 = tq[:, 1, :]
+        if mode == "left":
+            q = q0
+        elif mode == "right":
+            q = q1
+        else:
+            q1a = _quat_hemisphere_align(q1, q0)
+            q = q0 + q1a
+            q = q / torch.linalg.vector_norm(q, dim=-1, keepdim=True).clamp(min=1e-9)
+    else:
+        q = tq[:, 0, :]
+
+    env._moc_cache[key] = q
+    return q
+
+
+def get_tcp_pose_w(
+    env: "ManagerBasedRLEnv",
+    ee_frame_name: str = "ee_frame",
+    quat_mode: str = "avg",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Returns (pos_w (N,3), quat_w (N,4)) for TCP."""
+    return get_tcp_pos_w(env, ee_frame_name), get_tcp_quat_w(env, ee_frame_name, mode=quat_mode)

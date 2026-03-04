@@ -102,39 +102,37 @@ class TerminationsCfg:
 class RewardsCfg:
     tip_to_target_xy = RewTerm(
         func=mdp.reward_tip_to_target_xy,
-        weight=15.0,
-        params=dict(sigma_xy=0.15),
+        weight=5.0,#15.0
+        params=dict(sigma_xy=0.7),
     )
 
     tip_to_target_z = RewTerm(
         func=mdp.reward_tip_to_target_z,
-        weight=6.0,
-        params=dict(z_offset=0.10, sigma_z=0.06),
+        weight=2.0,#6.0
+        params=dict(z_offset=0.10, sigma_z=0.8),
     )
 
     close_cmd_in_zone = RewTerm(
         func=mdp.reward_close_cmd_in_grasp_zone,
-        weight=0.0,#2.0,
+        weight=0.0,#0.5,
         params=dict(radius_xy=0.04, z_lo=-0.01, z_hi=0.03),
     )
 
     close_cmd_outside_penalty = RewTerm(
         func=mdp.penalty_close_cmd_outside_grasp_zone,
-        weight=0.0,#1.0,
+        weight=0.0,#0.05,
         params=dict(radius_xy=0.06, z_lo=-0.02, z_hi=0.05),
     )
 
-    # 2) Lift: Z del cubo (gated por suction_on)
     lift_target = RewTerm(
         func=mdp.reward_lift_target_z,
-        weight=0.0,#10.0,
+        weight=0.0,#4.0,
         params=dict(
             z_lift_min=0.02,
             z_lift_max=0.12,
         ),
     )
 
-    # 3) Transport: cubo -> slot destino (XY), gated por suction_on + lifted
     move_target_to_goal_xy = RewTerm(
         func=mdp.reward_move_target_to_goal_xy,
         weight=0.0,#12.0,
@@ -144,7 +142,6 @@ class RewardsCfg:
         ),
     )
 
-    # 4) NEXT: commit cuando la tarea está establemente completada
     next_commit = RewTerm(
         func=mdp.reward_next_commit,
         weight=0.0,#1.0,
@@ -152,7 +149,7 @@ class RewardsCfg:
             tau=0.0,
             stable_window=6,
             cooldown_steps=40,
-            
+
             R_next_ok=15.0,
             R_next_bad=0.2,
             R_wait=0.01,
@@ -165,12 +162,11 @@ class RewardsCfg:
         ),
     )
 
-    # Penalización suave para estabilidad
-    joint_vel_penalty = RewTerm(
-        func=mdp.reward_penalty_joint_vel,
-        weight=0.002,
-        params=dict(lambda_vel=0.003),
-    )
+    # joint_vel_penalty = RewTerm(
+    #     func=mdp.reward_penalty_joint_vel,
+    #     weight=0.001,
+    #     params=dict(lambda_vel=0.003),
+    # )
 
 
 

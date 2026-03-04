@@ -190,20 +190,19 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
 
         # End-effector frame transformer (TIP via offset from ee_link rigid body)
         self.scene.ee_frame = FrameTransformerCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/base_link",
-            debug_vis=False,  # temporal para calibrar
+            # anchor on a rigid body
+            prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
+            debug_vis=True,
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
                     prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
-                    name="tip",
-                    offset=OffsetCfg(
-                        pos=[0.0, 0.0, 0.12],
-                        #rot=[0.0, 0.0, 0.70710678, 0.70710678],  # +90° sobre Z
-                    ),
+                    name="tcp",
+                    # offset guess: forward/down from base_link to the pinch midpoint
+                    # YOU MUST tune these numbers once with debug_vis
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.12)),
                 ),
-            ],
+            ]
         )
-
         # Actions
         self.actions.arm_action = JointPositionToLimitsActionCfg(
             asset_name="robot",
@@ -216,21 +215,21 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
                 "wrist_3_joint",
             ],
             # acción en [-1,1] -> límites del joint; opcionalmente reduce sensibilidad
-            scale={".*": 1.0},
-            clip={".*": (-1.0, 1.0)},
+            # scale={".*": 1.0},
+            # clip={".*": (-1.0, 1.0)},
             rescale_to_limits=True,
         )
 
-        self.actions.gripper = JointPositionActionCfg(
+        self.actions.gripper = JointPositionToLimitsActionCfg(
             asset_name="robot",
             joint_names=["finger_joint"],
-            use_default_offset=False,
-            preserve_order=True,
-            scale={".*": 0.8},
-            clip={".*": (-1.0, 1.0)},
+            # scale={".*": 1.0},
+            # clip={".*": (-1.0, 1.0)},
+            rescale_to_limits=True,
         )
+        
         # Robotiq: controla/observa el dedo principal
-        gripper_joint_names = ["finger_joint"]
+        # gripper_joint_names = ["finger_joint"]
 
         # NEXT action
         self.actions.next_action = mdp.NextFlagActionCfg(asset_name="robot")

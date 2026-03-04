@@ -16,6 +16,7 @@ from .step_cache import (
     get_active_cube_pos_w,
     get_active_cube_quat_w,
     get_nearest_slot_for_active_cubes_xy,
+    get_tcp_pose_w
 )
 
 # -------------------------
@@ -119,16 +120,18 @@ def ee_pose_in_base_frame(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     return_key: Literal["pos", "quat", None] = None,
 ) -> torch.Tensor:
-    """End-effector pose in robot base frame. Output (N,3) / (N,4) / (N,7)."""
-    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
-    ee_pos_w = ee_frame.data.target_pos_w[:, 0, :]
-    ee_quat_w = ee_frame.data.target_quat_w[:, 0, :]
+    """TCP pose in robot base frame. Output (N,3) / (N,4) / (N,7)."""
+
+    # Canonical TCP in world (midpoint of left_tip/right_tip)
+    ee_pos_w, ee_quat_w = get_tcp_pose_w(env, ee_frame_name=ee_frame_cfg.name, quat_mode="avg")
 
     robot: Articulation = env.scene[robot_cfg.name]
     root_pos_w = robot.data.root_pos_w
     root_quat_w = robot.data.root_quat_w
 
-    ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(root_pos_w, root_quat_w, ee_pos_w, ee_quat_w)
+    ee_pos_b, ee_quat_b = math_utils.subtract_frame_transforms(
+        root_pos_w, root_quat_w, ee_pos_w, ee_quat_w
+    )
 
     if return_key == "pos":
         return ee_pos_b

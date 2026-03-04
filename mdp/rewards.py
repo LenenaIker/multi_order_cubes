@@ -8,8 +8,7 @@ if TYPE_CHECKING:
 
 from .terminations import move_success
 from .commands import ensure_command_buffer, ensure_moc_buffers
-from .step_cache import get_active_cube_pos_w, get_slots_w
-
+from .step_cache import get_active_cube_pos_w, get_slots_w, get_tcp_pos_w
 
 # -----------------------------------------------------------------------------
 # Basic geometry helpers
@@ -18,10 +17,6 @@ from .step_cache import get_active_cube_pos_w, get_slots_w
 def _arange_env(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return torch.arange(env.num_envs, device=env.device)
 
-
-def get_ee_pos_w(env, ee_frame_name="ee_frame") -> torch.Tensor:
-    ee = env.scene[ee_frame_name]
-    return ee.data.target_pos_w[:, 0, :]
 
 
 def get_target_cube_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
@@ -72,7 +67,7 @@ def _grasp_zone_mask(
     """
     (N,) float mask 0..1 indicando si el tip está en una zona razonable de pregrasp.
     """
-    tip = get_ee_pos_w(env)          # (N,3)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")  # (N,3)          # (N,3)
     cube = get_target_cube_pos_w(env) # (N,3)
 
     dxy = tip[:, :2] - cube[:, :2]
@@ -242,7 +237,7 @@ def _cooldown_tick(env: "ManagerBasedRLEnv") -> None:
 def reward_tip_to_target_xy(env, sigma_xy: float = 0.25) -> torch.Tensor:
     ensure_command_buffer(env)
 
-    tip = get_ee_pos_w(env)                 # (N,3)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")  # (N,3)                 # (N,3)
     cube = get_target_cube_pos_w(env)       # (N,3)
 
     dxy = tip[:, :2] - cube[:, :2]
@@ -284,7 +279,7 @@ def reward_tip_to_target_z(env, z_offset: float = 0.0, sigma_z: float = 0.05) ->
     """
     ensure_command_buffer(env)
 
-    tip = get_ee_pos_w(env)           # (N,3)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")  # (N,3)           # (N,3)
     cube = get_target_cube_pos_w(env) # (N,3)
 
     dz = tip[:, 2] - (cube[:, 2] + float(z_offset))
@@ -380,7 +375,7 @@ def reward_close_cmd_in_grasp_zone(
     """
     ensure_command_buffer(env)
 
-    tip = get_ee_pos_w(env)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")  # (N,3)
     cube = get_target_cube_pos_w(env)
 
     dxy = tip[:, :2] - cube[:, :2]
@@ -411,7 +406,7 @@ def penalty_close_cmd_outside_grasp_zone(
     """
     ensure_command_buffer(env)
 
-    tip = get_ee_pos_w(env)
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")  # (N,3)
     cube = get_target_cube_pos_w(env)
 
     dxy = tip[:, :2] - cube[:, :2]

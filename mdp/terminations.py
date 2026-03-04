@@ -12,11 +12,12 @@ import re
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+from .constants import CUBE_KEYS_9
 from .step_cache import (
     get_slots_w,
     get_active_cube_pos_w,
     get_nearest_slot_for_active_cubes_xy,
-    CUBE_KEYS_9
+    get_tcp_pos_w
 )
 
 
@@ -88,7 +89,7 @@ def ee_below_table(
             "Check moc_ur10_env_cfg.py: ee_frame must target '{ENV_REGEX_NS}/Robot/ee_link/Tip'."
         ) from e
 
-    tip_pos = ee_frame.data.target_pos_w[:, 0, :3]
+    tip_pos = get_tcp_pos_w(env, ee_frame_name="ee_frame")  # (N,3)
     z_thresh = float(table_z) - float(z_margin_below_slots)
     return tip_pos[:, 2] < z_thresh
 

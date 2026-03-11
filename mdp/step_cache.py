@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import torch
 from typing import TYPE_CHECKING
+
+import torch
 
 from .constants import CUBE_KEYS_9
 
@@ -10,26 +11,16 @@ if TYPE_CHECKING:
 
 
 def _ensure_cache(env: "ManagerBasedRLEnv") -> None:
-    """Initialize cache containers lazily."""
     if not hasattr(env, "_moc_cache") or env._moc_cache is None:
         env._moc_cache = {}
-
-    # Token used to decide whether cache is still valid for the *current* sim step.
     if not hasattr(env, "_moc_cache_token") or env._moc_cache_token is None:
         env._moc_cache_token = -1
-
-    # Monotonic reset id (used to invalidate cache across resets).
     if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None:
         env._moc_reset_id = 0
 
 
-def _get_step_token(env: "ManagerBasedRLEnv") -> int:
-    """Token that changes every sim step (and across resets).
-
-    Uses a cheap signature derived from episode_length_buf + reset_buf, plus a monotonic reset id.
-    """
+def _step_token(env: "ManagerBasedRLEnv") -> int:
     if not hasattr(env, "episode_length_buf") or env.episode_length_buf is None:
-        # Worst case fallback: always invalidate-ish.
         return int(getattr(env, "_moc_reset_id", 0))
 
     el = env.episode_length_buf
@@ -42,155 +33,127 @@ def _get_step_token(env: "ManagerBasedRLEnv") -> int:
         rb = int(env.reset_buf.sum().item())
 
     rid = int(getattr(env, "_moc_reset_id", 0))
-
     base = (s << 32) ^ (mx << 16) ^ (mn << 8) ^ rb
     return (rid << 48) ^ base
 
 
-def _invalidate_if_needed(env: "ManagerBasedRLEnv") -> None:
-    """Invalidate cache if env step changed."""
+def _invalidate_cache_if_needed(env: "ManagerBasedRLEnv") -> None:
     _ensure_cache(env)
-    token = _get_step_token(env)
+    token = _step_token(env)
     if env._moc_cache_token != token:
         env._moc_cache.clear()
         env._moc_cache_token = token
 
 
 def get_slots_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """(N,4,3) slot positions in world frame."""
-    _invalidate_if_needed(env)
+    _invalidate_cache_if_needed(env)
     key = "slots_w"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)  # (4,3)
-    origins = env.scene.env_origins  # (N,3)
-    slots_w = slots_local.unsqueeze(0) + origins.unsqueeze(1)  # (N,4,3)
+    slots_local = torch.as_tensor(env.cfg.slot_positions, dtype=torch.float32, device=env.device)
+    slots_w = slots_local.unsqueeze(0) + env.scene.env_origins.unsqueeze(1)
 
     env._moc_cache[key] = slots_w
     return slots_w
 
 
 def get_cube_pos9_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """(N,9,3) positions for all 9 cube assets."""
-    _invalidate_if_needed(env)
-    key = "pos9_w"
+    _invalidate_cache_if_needed(env)
+    key = "cube_pos9_w"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    pos9 = torch.stack([env.scene[k].data.root_pos_w for k in CUBE_KEYS_9], dim=1)  # (N,9,3)
+    pos9 = torch.stack([env.scene[key].data.root_pos_w for key in CUBE_KEYS_9], dim=1)
     env._moc_cache[key] = pos9
     return pos9
 
 
 def get_cube_quat9_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """(N,9,4) quaternions for all 9 cube assets."""
-    _invalidate_if_needed(env)
-    key = "quat9_w"
+    _invalidate_cache_if_needed(env)
+    key = "cube_quat9_w"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    quat9 = torch.stack([env.scene[k].data.root_quat_w for k in CUBE_KEYS_9], dim=1)  # (N,9,4)
+    quat9 = torch.stack([env.scene[key].data.root_quat_w for key in CUBE_KEYS_9], dim=1)
     env._moc_cache[key] = quat9
     return quat9
 
 
 def get_active_cube_pos_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """(N,3,3) positions for active cubes only."""
-        # Cold-start: ObservationManager llama a obs antes de reset().
     if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        # Si aún no hubo ningún reset, devolvemos ceros para inferir dims.
-        if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None or env._moc_reset_id == 0:
-            N = int(getattr(env, "num_envs", 1))
-            device = getattr(env, "device", "cpu")
-            return torch.zeros((N, 3, 3), dtype=torch.float32, device=device)
+        if int(getattr(env, "_moc_reset_id", 0)) == 0:
+            return torch.zeros((env.num_envs, 3, 3), dtype=torch.float32, device=env.device)
+        raise RuntimeError("env.active_cube_indices is missing after reset.")
 
-        # Si ya hubo reset y sigue faltando -> bug real
-        raise RuntimeError(
-            "active_cube_indices is not set after reset. randomize_cubes_on_slots didn't run."
-        )
-    
-    _invalidate_if_needed(env)
-    key = "active_pos_w"
+    _invalidate_cache_if_needed(env)
+    key = "active_cube_pos_w"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        raise RuntimeError(
-            "active_cube_indices is not set. randomize_cubes_on_slots likely didn't run before rewards/obs."
-        )
-
-    pos9 = get_cube_pos9_w(env)  # (N,9,3)
-    idx = env.active_cube_indices  # (N,3)
-    active = pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))  # (N,3,3)
+    pos9 = get_cube_pos9_w(env)
+    idx = env.active_cube_indices
+    active = pos9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 3))
 
     env._moc_cache[key] = active
     return active
 
 
 def get_active_cube_quat_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """(N,3,4) quaternions for active cubes only."""
-    _invalidate_if_needed(env)
-    key = "active_quat_w"
+    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
+        if int(getattr(env, "_moc_reset_id", 0)) == 0:
+            quat = torch.zeros((env.num_envs, 3, 4), dtype=torch.float32, device=env.device)
+            quat[..., 0] = 1.0
+            return quat
+        raise RuntimeError("env.active_cube_indices is missing after reset.")
+
+    _invalidate_cache_if_needed(env)
+    key = "active_cube_quat_w"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    if not hasattr(env, "active_cube_indices") or env.active_cube_indices is None:
-        N = int(getattr(env, "num_envs", 1))
-        device = getattr(env, "device", "cpu")
-        q = torch.zeros((N, 3, 4), dtype=torch.float32, device=device)
-        q[..., 0] = 1.0
-        return q
-
-    quat9 = get_cube_quat9_w(env)  # (N,9,4)
-    idx = env.active_cube_indices  # (N,3)
-    active = quat9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 4))  # (N,3,4)
+    quat9 = get_cube_quat9_w(env)
+    idx = env.active_cube_indices
+    active = quat9.gather(1, idx.unsqueeze(-1).expand(-1, -1, 4))
 
     env._moc_cache[key] = active
     return active
 
 
 def get_nearest_slot_for_active_cubes_xy(env: "ManagerBasedRLEnv", num_slots: int = 4) -> torch.Tensor:
-    """(N,3) nearest slot index per active cube using XY distance."""
-    _invalidate_if_needed(env)
-    key = "nearest_slot_active_xy"
+    _invalidate_cache_if_needed(env)
+    key = f"nearest_slot_xy:{num_slots}"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    cubes = get_active_cube_pos_w(env)[:, :, :2]  # (N,3,2)
-    slots = get_slots_w(env)[:, :, :2]           # (N,4,2)
+    cubes_xy = get_active_cube_pos_w(env)[:, :, :2]
+    slots_xy = get_slots_w(env)[:, :num_slots, :2]
 
-    d = cubes.unsqueeze(2) - slots.unsqueeze(1)  # (N,3,4,2)
-    dist2 = (d * d).sum(dim=-1)                  # (N,3,4)
-    nearest = torch.argmin(dist2, dim=2)          # (N,3)
+    diff = cubes_xy.unsqueeze(2) - slots_xy.unsqueeze(1)
+    dist2 = (diff * diff).sum(dim=-1)
+    nearest = torch.argmin(dist2, dim=2)
 
     env._moc_cache[key] = nearest
     return nearest
 
 
-# =========================
-# TCP (midpoint) utilities
-# =========================
-
 def get_tcp_pos_w(env: "ManagerBasedRLEnv", ee_frame_name: str = "ee_frame") -> torch.Tensor:
-    """(N,3) TCP position in world. Midpoint of ['left_tip','right_tip'] if available."""
-    _invalidate_if_needed(env)
+    _invalidate_cache_if_needed(env)
     key = f"tcp_pos_w:{ee_frame_name}"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    tf = env.scene[ee_frame_name].data.target_pos_w  # (N,2,3) in your setup
-    if tf.ndim == 3 and tf.shape[1] >= 2:
-        pos = 0.5 * (tf[:, 0, :] + tf[:, 1, :])
+    tf_pos = env.scene[ee_frame_name].data.target_pos_w
+    if tf_pos.ndim == 3 and tf_pos.shape[1] >= 2:
+        pos = 0.5 * (tf_pos[:, 0, :] + tf_pos[:, 1, :])
     else:
-        pos = tf[:, 0, :]
+        pos = tf_pos[:, 0, :]
 
     env._moc_cache[key] = pos
     return pos
 
 
 def _quat_hemisphere_align(q: torch.Tensor, q_ref: torch.Tensor) -> torch.Tensor:
-    """Align quaternion sign to reference hemisphere. q,q_ref: (N,4)."""
     dot = torch.sum(q * q_ref, dim=-1, keepdim=True)
     return torch.where(dot < 0.0, -q, q)
 
@@ -200,35 +163,29 @@ def get_tcp_quat_w(
     ee_frame_name: str = "ee_frame",
     mode: str = "avg",
 ) -> torch.Tensor:
-    """(N,4) TCP orientation in world.
-
-    mode:
-      - 'left'  -> quat of target 0
-      - 'right' -> quat of target 1
-      - 'avg'   -> hemisphere-align + normalize(q0 + q1)
-    """
-    _invalidate_if_needed(env)
+    _invalidate_cache_if_needed(env)
     key = f"tcp_quat_w:{ee_frame_name}:{mode}"
     if key in env._moc_cache:
         return env._moc_cache[key]
 
-    tq = env.scene[ee_frame_name].data.target_quat_w  # (N,2,4)
-    if tq.ndim == 3 and tq.shape[1] >= 2:
-        q0 = tq[:, 0, :]
-        q1 = tq[:, 1, :]
-        if mode == "left":
-            q = q0
-        elif mode == "right":
-            q = q1
-        else:
-            q1a = _quat_hemisphere_align(q1, q0)
-            q = q0 + q1a
-            q = q / torch.linalg.vector_norm(q, dim=-1, keepdim=True).clamp(min=1e-9)
-    else:
-        q = tq[:, 0, :]
+    tf_quat = env.scene[ee_frame_name].data.target_quat_w
+    if tf_quat.ndim == 3 and tf_quat.shape[1] >= 2:
+        q0 = tf_quat[:, 0, :]
+        q1 = tf_quat[:, 1, :]
 
-    env._moc_cache[key] = q
-    return q
+        if mode == "left":
+            quat = q0
+        elif mode == "right":
+            quat = q1
+        else:
+            q1 = _quat_hemisphere_align(q1, q0)
+            quat = q0 + q1
+            quat = quat / torch.linalg.vector_norm(quat, dim=-1, keepdim=True).clamp(min=1e-9)
+    else:
+        quat = tf_quat[:, 0, :]
+
+    env._moc_cache[key] = quat
+    return quat
 
 
 def get_tcp_pose_w(
@@ -236,5 +193,4 @@ def get_tcp_pose_w(
     ee_frame_name: str = "ee_frame",
     quat_mode: str = "avg",
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Returns (pos_w (N,3), quat_w (N,4)) for TCP."""
     return get_tcp_pos_w(env, ee_frame_name), get_tcp_quat_w(env, ee_frame_name, mode=quat_mode)

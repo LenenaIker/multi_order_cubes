@@ -194,3 +194,8 @@ def get_tcp_pose_w(
     quat_mode: str = "avg",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return get_tcp_pos_w(env, ee_frame_name), get_tcp_quat_w(env, ee_frame_name, mode=quat_mode)
+
+def invalidate_moc_cache(env: "ManagerBasedRLEnv") -> None:
+    _ensure_cache(env)
+    env._moc_cache.clear()
+    env._moc_cache_token = -1

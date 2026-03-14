@@ -10,6 +10,7 @@ from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab_assets.robots.universal_robots import UR10e_ROBOTIQ_GRIPPER_CFG  # type: ignore
+from isaaclab.markers.config import FRAME_MARKER_CFG
 
 from ... import mdp
 from ...moc_env_cfg import MOCEnvCfg, ObjectTableSceneCfg
@@ -104,24 +105,21 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
             getattr(self.scene, name).init_state.pos = parked_pos
 
         self.scene.robot = UR10e_ROBOTIQ_GRIPPER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-        robot_cfg = self.scene.robot
 
-        for key in ["shoulder", "elbow", "wrist"]:
-            if key in robot_cfg.actuators:
-                actuator = robot_cfg.actuators[key]
-                if getattr(actuator, "effort_limit_sim", None) in (None, 0.0):
-                    actuator.effort_limit_sim = 330.0
-                if getattr(actuator, "velocity_limit_sim", None) in (None, 0.0):
-                    actuator.velocity_limit_sim = 3.0
+
+        marker_cfg = FRAME_MARKER_CFG.copy()
+        marker_cfg.prim_path = "/Visuals/TcpFrame"
+        marker_cfg.markers["frame"].scale = (0.03, 0.03, 0.03)
 
         self.scene.ee_frame = FrameTransformerCfg(
             prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
-            debug_vis=False,
+            debug_vis=True,
+            visualizer_cfg=marker_cfg, # Eje pequeño
             target_frames=[
                 FrameTransformerCfg.FrameCfg(
                     prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
                     name="tcp",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.12)),
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.18)),
                 ),
             ],
         )

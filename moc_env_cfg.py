@@ -82,18 +82,33 @@ class RewardsCfg:
         params=dict(k_xy=0.12, p=1.0),
     )
 
-    reach_xy_progress = RewTerm(
-        func=mdp.reward_reach_xy_progress,
-        weight=20.0,
-        params=dict(scale=1.0, clip=0.02),
-    )
+    # reach_xy_progress = RewTerm(
+    #     func=mdp.reward_reach_xy_progress,
+    #     weight=20.0,
+    #     params=dict(scale=1.0, clip=0.02),
+    # )
 
     reach_z = RewTerm(
         func=mdp.reward_reach_z_gated,
-        weight=2.0,
-        params=dict(z_offset=0.10, sigma_z=0.06, gate_dxy=0.18, gate_band=0.05),
+        weight=6.0,
+        params=dict(sigma_z=0.06, gate_dxy=0.18, gate_band=0.05),
     )
 
+    arm_joint_vel_penalty = RewTerm(
+        func=mdp.penalty_arm_joint_velocity,
+        weight=-0.00000000001,
+        params=dict(
+            asset_name="robot",
+            joint_names=[
+                "shoulder_pan_joint",
+                "shoulder_lift_joint",
+                "elbow_joint",
+                "wrist_1_joint",
+                "wrist_2_joint",
+                "wrist_3_joint",
+            ],
+        ),
+    )
 
 @configclass
 class EventsCfg:
@@ -128,7 +143,7 @@ class MOCEnvCfg(ManagerBasedRLEnvCfg):
         )
 
         self.decimation = 5
-        self.episode_length_s = 30.0
+        self.episode_length_s = 10.0
         self.sim.dt = 0.01
         self.sim.render_interval = 2
 

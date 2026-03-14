@@ -83,7 +83,6 @@ def reward_reach_xy_progress(
 
 def reward_reach_z_gated(
     env: "ManagerBasedRLEnv",
-    z_offset: float = 0.10,
     sigma_z: float = 0.06,
     gate_dxy: float = 0.18,
     gate_band: float = 0.05,
@@ -93,7 +92,7 @@ def reward_reach_z_gated(
 
     dist_xy = _safe_norm(tip[:, :2] - cube[:, :2])
 
-    dz = tip[:, 2] - (cube[:, 2] + float(z_offset))
+    dz = tip[:, 2] - cube[:, 2]
     sigma = float(max(1e-6, sigma_z))
     z_reward = torch.exp(-0.5 * (dz * dz) / (sigma * sigma))
 
@@ -105,3 +104,22 @@ def reward_reach_z_gated(
     env.extras["moc/reach_abs_dz"] = torch.abs(dz)
 
     return gate * z_reward
+
+
+def penalty_arm_joint_velocity(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    joint_names: list[str] | None = None,
+) -> torch.Tensor:
+
+    robot = env.scene[asset_name]
+
+    joint_ids, _ = robot.find_joints(joint_names)
+
+    qd = robot.data.joint_vel[:, joint_ids]
+
+    penalty = torch.sum(qd * qd, dim=-1)
+
+    env.extras["moc/arm_joint_vel_l2"] = penalty
+
+    return penalty

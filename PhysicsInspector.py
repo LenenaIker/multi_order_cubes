@@ -129,13 +129,15 @@ def main():
         # reach_z      weight = 2.0
         # ---------------------------------------------
         r_xy = mdp.reward_reach_xy_rational(env, k_xy=0.25, p=1.0)
+        
         r_z = mdp.reward_reach_z_gated(
             env,
             sigma_z=0.08,
             gate_dxy=0.16,
             gate_band=0.06,
         )
-        r_total = 4.0 * r_xy + 2.0 * r_z
+
+        r_total = 6.0 * r_xy + 6.0 * r_z
 
         # ---------------------------------------------
         # Read extra debug values saved by rewards.py

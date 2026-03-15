@@ -6,6 +6,8 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.devices.openxr import XrCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.envs.mdp.actions import JointPositionActionCfg
+from isaaclab.managers.action_manager import ActionTermCfg
+
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -45,7 +47,7 @@ class ObjectTableSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class ActionsCfg:
-    arm_action: JointPositionActionCfg = MISSING
+    arm_action: ActionTermCfg = MISSING
     gripper: JointPositionActionCfg = MISSING
     next_action: mdp.NextFlagActionCfg = MISSING
 
@@ -78,7 +80,7 @@ class TerminationsCfg:
 class RewardsCfg:
     reach_xy_abs = RewTerm(
         func=mdp.reward_reach_xy_rational,
-        weight=6.0,
+        weight=12.0,
         params=dict(k_xy=0.12, p=1.0),
     )
 
@@ -90,25 +92,35 @@ class RewardsCfg:
 
     reach_z = RewTerm(
         func=mdp.reward_reach_z_gated,
-        weight=6.0,
+        weight=8.0,
         params=dict(sigma_z=0.06, gate_dxy=0.18, gate_band=0.05),
     )
 
-    arm_joint_vel_penalty = RewTerm(
-        func=mdp.penalty_arm_joint_velocity,
-        weight=-0.00000000001,
-        params=dict(
-            asset_name="robot",
-            joint_names=[
-                "shoulder_pan_joint",
-                "shoulder_lift_joint",
-                "elbow_joint",
-                "wrist_1_joint",
-                "wrist_2_joint",
-                "wrist_3_joint",
-            ],
-        ),
-    )
+    # arm_vel_penalty = RewTerm(
+    #     func=mdp.penalty_arm_joint_velocity,
+    #     weight=-1e-35,
+    #     params=dict(
+    #         asset_name="robot",
+    #         joint_names=[
+    #             "shoulder_pan_joint",
+    #             "shoulder_lift_joint",
+    #             "elbow_joint",
+    #         ],
+    #     ),
+    # )
+
+    # wrist_vel_penalty = RewTerm(
+    #     func=mdp.penalty_arm_joint_velocity,
+    #     weight=-1e-13,
+    #     params=dict(
+    #         asset_name="robot",
+    #         joint_names=[
+    #             "wrist_1_joint",
+    #             "wrist_2_joint",
+    #             "wrist_3_joint",
+    #         ],
+    #     ),
+    # )
 
 @configclass
 class EventsCfg:
@@ -117,7 +129,7 @@ class EventsCfg:
 
 @configclass
 class MOCEnvCfg(ManagerBasedRLEnvCfg):
-    scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=4096, env_spacing=2.5, replicate_physics=False)
+    scene: ObjectTableSceneCfg = ObjectTableSceneCfg(num_envs=512, env_spacing=2.5, replicate_physics=False)
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     terminations: TerminationsCfg = TerminationsCfg()

@@ -4,6 +4,9 @@ import os
 
 from isaaclab.assets import RigidObjectCfg
 from isaaclab.envs.mdp.actions import JointPositionToLimitsActionCfg
+from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+
 from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
@@ -11,6 +14,7 @@ from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
 from isaaclab.utils import configclass
 from isaaclab_assets.robots.universal_robots import UR10e_ROBOTIQ_GRIPPER_CFG  # type: ignore
 from isaaclab.markers.config import FRAME_MARKER_CFG
+
 
 from ... import mdp
 from ...moc_env_cfg import MOCEnvCfg, ObjectTableSceneCfg
@@ -124,7 +128,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
             ],
         )
 
-        self.actions.arm_action = JointPositionToLimitsActionCfg(
+        self.actions.arm_action = DifferentialInverseKinematicsActionCfg(
             asset_name="robot",
             joint_names=[
                 "shoulder_pan_joint",
@@ -134,9 +138,19 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
                 "wrist_2_joint",
                 "wrist_3_joint",
             ],
-            rescale_to_limits=True,
+            body_name="robotiq_base_link",
+            body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(
+                pos=(0.0, 0.0, 0.18),
+            ),
+            controller=DifferentialIKControllerCfg(
+                command_type="pose",
+                use_relative_mode=True,
+                ik_method="dls",
+            ),
+            scale=(0.02, 0.02, 0.02, 0.05, 0.05, 0.05),
+            debug_vis=False,
         )
-
+        
         self.actions.gripper = JointPositionToLimitsActionCfg(
             asset_name="robot",
             joint_names=["finger_joint"],

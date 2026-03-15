@@ -1,23 +1,15 @@
 import argparse
 from isaaclab.app import AppLauncher
 
-# -------------------------------------------------
-# CLI
-# -------------------------------------------------
 parser = argparse.ArgumentParser()
 parser.add_argument("--num_envs", type=int, default=1)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# -------------------------------------------------
-# Launch app FIRST
-# -------------------------------------------------
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-# -------------------------------------------------
-# Imports AFTER app creation
-# -------------------------------------------------
+
 import torch  # noqa: E402
 import omni.ui as ui  # noqa: E402
 
@@ -29,9 +21,6 @@ from multi_order_cubes import mdp  # noqa: E402
 
 
 
-# =================================================
-# Small debug HUD
-# =================================================
 class RewardDebugHUD:
     def __init__(self):
         self.window = ui.Window(
@@ -83,19 +72,13 @@ def main():
     env_cfg = UR10LongSuctionMultiOrderCubesEnvCfg()
     env_cfg.scene.num_envs = 1
 
-    # -------------------------------------------------
-    # IMPORTANT: CPU physics so Physics Inspector can drive joints
-    # -------------------------------------------------
     env_cfg.sim.device = "cpu"
     env_cfg.sim.physx.use_gpu = False
 
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
     obs, info = env.reset()
-
-    # -------------------------------------------------
-    # Fixed command for debugging
-    # -------------------------------------------------
+    
     env.command_from_to = torch.tensor([[1, 2]], dtype=torch.long, device=env.device)
     latch_target_cube_from_command(env)
 
@@ -105,29 +88,18 @@ def main():
     i = 0
 
     while simulation_app.is_running():
-        # No env.step(actions)
         env.sim.step()
         env.scene.update(physics_dt)
 
         invalidate_moc_cache(env)
 
-        # IMPORTANTE: sin env.step(), el step_cache no se invalida solo
         if hasattr(env, "_moc_cache"):
             env._moc_cache.clear()
         if hasattr(env, "_moc_cache_token"):
             env._moc_cache_token = -1
 
-        # ---------------------------------------------
-        # Recompute observations manually
-        # ---------------------------------------------
         obs = env.observation_manager.compute()
 
-        # ---------------------------------------------
-        # Recompute reward terms manually
-        # Current cfg:
-        # reach_xy_abs weight = 3.0
-        # reach_z      weight = 2.0
-        # ---------------------------------------------
         r_xy = mdp.reward_reach_xy_rational(env, k_xy=0.25, p=1.0)
         
         r_z = mdp.reward_reach_z_gated(
@@ -139,16 +111,14 @@ def main():
 
         r_total = 6.0 * r_xy + 6.0 * r_z
 
-        # ---------------------------------------------
+
         # Read extra debug values saved by rewards.py
-        # ---------------------------------------------
         dxy = env.extras.get("moc/reach_dist_xy", None) if hasattr(env, "extras") and env.extras else None
         gate = env.extras.get("moc/reach_gate_xy", None) if hasattr(env, "extras") and env.extras else None
         adz = env.extras.get("moc/reach_abs_dz", None) if hasattr(env, "extras") and env.extras else None
 
-        # ---------------------------------------------
+
         # Read TCP and target cube positions
-        # ---------------------------------------------
         tcp = mdp.get_tcp_pos_w(env, ee_frame_name="ee_frame")
         active_cubes = mdp.get_active_cube_pos_w(env)
 
@@ -156,15 +126,10 @@ def main():
         row = torch.arange(env.num_envs, device=env.device)
         target_cube = active_cubes[row, target_id, :]
 
-        # ---------------------------------------------
-        # Command text
-        # ---------------------------------------------
+
         cmd = env.command_from_to[0].detach().cpu().tolist()
         target_cube_id = int(env.target_cube_id[0].item())
-
-        # ---------------------------------------------
-        # Obs shape text
-        # ---------------------------------------------
+        
         if isinstance(obs, dict):
             obs_desc = []
             for k, v in obs.items():
@@ -197,9 +162,6 @@ def main():
         hud.set_text("rtotal", f"reward_total: {r_total[0].item():.5f}")
         hud.set_text("obs_shape", f"obs shape: {obs_shape_str}")
 
-        # ---------------------------------------------
-        # Optional terminal print every 20 frames
-        # ---------------------------------------------
         if i % 20 == 0:
             print(
                 f"[{i:06d}] "

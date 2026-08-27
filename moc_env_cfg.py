@@ -146,26 +146,8 @@ class RewardsCfg:
         ),
     )
 
-    grasp_contact = RewTerm(
-        func=mdp.reward_grasp_contact,
-        weight=10.0,
-        params=dict(max_force=20.0, bonus=5.0),
-    )
-
-    lift_height = RewTerm(
-        func=mdp.reward_lift_height,
-        weight=15.0,
-        params=dict(max_lift=0.15, bonus=8.0),
-    )
-
 @configclass
 class EventsCfg:
-    moc_activate_finger_contacts = EventTerm(
-        func=mdp.activate_finger_contact_sensors,
-        mode="prestartup",
-        params=dict(force_threshold=1.0),
-    )
-
     moc_reset = EventTerm(func=mdp.moc_reset_on_reset, mode="reset", params={})
 
     moc_next_flag = EventTerm(
@@ -174,21 +156,6 @@ class EventsCfg:
         interval_range_s=(0.0, 0.0),  # placeholder; set to (step_dt, step_dt) in __post_init__
         is_global_time=False,
         params=dict(next_threshold=_NEXT_THRESHOLD, cooldown_steps=_NEXT_COOLDOWN_STEPS),
-    )
-
-    moc_phase_update = EventTerm(
-        func=mdp.update_moc_phase,
-        mode="interval",
-        interval_range_s=(0.0, 0.0),  # placeholder; set to (step_dt, step_dt) in __post_init__
-        is_global_time=False,
-        params=dict(
-            force_threshold=1.0,
-            grasp_hold_steps=5,
-            lift_height=0.08,
-            lift_hold_steps=10,
-            reach_exit_xy=0.08,
-            reach_exit_z=0.05,
-        ),
     )
 
 
@@ -226,7 +193,6 @@ class MOCEnvCfg(ManagerBasedRLEnvCfg):
 
         step_dt = self.decimation * self.sim.dt
         self.events.moc_next_flag.interval_range_s = (step_dt, step_dt)
-        self.events.moc_phase_update.interval_range_s = (step_dt, step_dt)
 
         self.sim.physx.bounce_threshold_velocity = 0.01
         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4

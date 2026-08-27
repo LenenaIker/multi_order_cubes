@@ -195,37 +195,6 @@ def get_tcp_pose_w(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return get_tcp_pos_w(env, ee_frame_name), get_tcp_quat_w(env, ee_frame_name, mode=quat_mode)
 
-def get_finger_cube_contact_force(env: "ManagerBasedRLEnv") -> torch.Tensor:
-    """Contact force magnitude [left, right] against the target cube only, shape (num_envs, 2).
-
-    Uses the per-cube filtered force_matrix_w from the two finger ContactSensors (see
-    config/ur10_gripper/moc_ur10_env_cfg.py), gathered down to whichever of the 9 cube prims is
-    this env's current target. A finger pressing on a bystander cube or the table reads 0 here.
-    """
-    _invalidate_cache_if_needed(env)
-    key = "finger_cube_contact_force"
-    if key in env._moc_cache:
-        return env._moc_cache[key]
-
-    target_id = env.target_cube_id.to(torch.long)
-    active_idx = env.active_cube_indices
-    row = torch.arange(env.num_envs, device=env.device)
-    target_global_idx = active_idx[row, target_id]
-
-    left = env.scene["left_finger_contact"].data.force_matrix_w
-    right = env.scene["right_finger_contact"].data.force_matrix_w
-
-    left_mag = torch.linalg.vector_norm(left[:, 0], dim=-1)
-    right_mag = torch.linalg.vector_norm(right[:, 0], dim=-1)
-
-    left_on_target = left_mag.gather(1, target_global_idx.view(-1, 1)).squeeze(1)
-    right_on_target = right_mag.gather(1, target_global_idx.view(-1, 1)).squeeze(1)
-
-    out = torch.stack([left_on_target, right_on_target], dim=1)
-    env._moc_cache[key] = out
-    return out
-
-
 def invalidate_moc_cache(env: "ManagerBasedRLEnv") -> None:
     _ensure_cache(env)
     env._moc_cache.clear()

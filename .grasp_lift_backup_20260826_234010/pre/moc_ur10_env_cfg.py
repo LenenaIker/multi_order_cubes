@@ -7,7 +7,7 @@ from isaaclab.envs.mdp.actions import JointPositionToLimitsActionCfg
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 
-from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
+from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
@@ -109,19 +109,6 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
             getattr(self.scene, name).init_state.pos = parked_pos
 
         self.scene.robot = UR10e_ROBOTIQ_GRIPPER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
-
-        cube_filter_paths = [f"{{ENV_REGEX_NS}}/{key}" for key in mdp.CUBE_KEYS_9]
-
-        self.scene.left_finger_contact = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/left_inner_finger",
-            filter_prim_paths_expr=cube_filter_paths,
-            force_threshold=1.0,
-        )
-        self.scene.right_finger_contact = ContactSensorCfg(
-            prim_path="{ENV_REGEX_NS}/Robot/right_inner_finger",
-            filter_prim_paths_expr=cube_filter_paths,
-            force_threshold=1.0,
-        )
 
 
         marker_cfg = FRAME_MARKER_CFG.copy()

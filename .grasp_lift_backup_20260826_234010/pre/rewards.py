@@ -6,13 +6,7 @@ import torch
 import isaaclab.utils.math as math_utils
 
 from .events import next_trigger_mask
-from .step_cache import (
-    get_active_cube_pos_w,
-    get_finger_cube_contact_force,
-    get_slots_w,
-    get_tcp_pos_w,
-    get_tcp_quat_w,
-)
+from .step_cache import get_active_cube_pos_w, get_slots_w, get_tcp_pos_w, get_tcp_quat_w
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -38,20 +32,6 @@ def _safe_norm(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return torch.sqrt(torch.sum(x * x, dim=-1) + eps)
 
 
-def _phase_at_most(env: "ManagerBasedRLEnv", max_phase: int) -> torch.Tensor:
-    """1.0 while env.moc_phase <= max_phase, 0.0 once past it (all-ones before the first reset)."""
-    if not hasattr(env, "moc_phase") or env.moc_phase is None:
-        return torch.ones((env.num_envs,), dtype=torch.float32, device=env.device)
-    return (env.moc_phase <= int(max_phase)).to(torch.float32)
-
-
-def _phase_at_least(env: "ManagerBasedRLEnv", min_phase: int) -> torch.Tensor:
-    """1.0 while env.moc_phase >= min_phase, 0.0 before it (all-zeros before the first reset)."""
-    if not hasattr(env, "moc_phase") or env.moc_phase is None:
-        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
-    return (env.moc_phase >= int(min_phase)).to(torch.float32)
-
-
 def reward_reach_xy_rational(
     env: "ManagerBasedRLEnv",
     k_xy: float = 0.10,
@@ -70,7 +50,7 @@ def reward_reach_xy_rational(
         env.extras = {}
     env.extras["moc/reach_dist_xy"] = dist_xy
 
-    return reward * _phase_at_most(env, 2)
+    return reward
 
 
 def reward_reach_xy_progress(
@@ -139,7 +119,7 @@ def reward_reach_z_gated(
     env.extras["moc/reach_gate_xy"] = gate
     env.extras["moc/reach_abs_dz"] = torch.abs(dz)
 
-    return gate * z_reward * _phase_at_most(env, 2)
+    return gate * z_reward
 
 
 def reward_gripper_orientation_down(
@@ -330,88 +310,3 @@ def penalty_bystander_displacement(
     env.extras["moc/bystander_disp"] = bystander_disp.sum(dim=1)
 
     return penalty
-
-
-def reward_grasp_contact(
-    env: "ManagerBasedRLEnv",
-    max_force: float = 20.0,
-    bonus: float = 5.0,
-) -> torch.Tensor:
-    """Continuous reward for bilateral contact force on the target cube, plus a one-shot bonus.
-
-    Active while `env.moc_phase >= 2` (Grasp or Lift, see `mdp.events.update_moc_phase`). Uses
-    the *minimum* of the two per-finger forces (not the sum), so pushing hard with only one
-    finger scores near zero, pressuring a proper two-sided grasp of the target cube. Force is
-    read straight from `get_finger_cube_contact_force`, already filtered per-finger down to the
-    target cube prim only (a bystander cube or the table under the finger reads 0 there).
-
-    `max_force` caps the raw signal before normalizing, same pattern as `penalty_arm_joint_velocity`'s
-    `max_l2`: a physics interpenetration spike must not produce an unbounded reward and poison
-    the SAC critic. The bonus fires once, on `env.moc_grasp_trigger` (the exact step
-    `update_moc_phase` advances phase 2->3), the same one-shot pattern as `reward_next_signal`'s
-    bonus on `next_trigger_mask`.
-    """
-    active = _phase_at_least(env, 2)
-
-    contact = get_finger_cube_contact_force(env)
-    symmetric = torch.clamp(torch.minimum(contact[:, 0], contact[:, 1]), max=float(max_force))
-    continuous = (symmetric / float(max(1e-6, max_force))) * active
-
-    if hasattr(env, "moc_grasp_trigger") and env.moc_grasp_trigger is not None:
-        trigger = env.moc_grasp_trigger.to(torch.float32)
-    else:
-        trigger = torch.zeros_like(continuous)
-
-    reward = continuous + float(bonus) * trigger
-
-    if not hasattr(env, "extras") or env.extras is None:
-        env.extras = {}
-    env.extras["moc/grasp_force_min"] = symmetric
-
-    return reward
-
-
-def reward_lift_height(
-    env: "ManagerBasedRLEnv",
-    max_lift: float = 0.15,
-    bonus: float = 8.0,
-) -> torch.Tensor:
-    """Continuous reward for raising the target cube above its reset height, plus a one-shot bonus.
-
-    Active only while `env.moc_phase == 3` (Lift, see `mdp.events.update_moc_phase`) — phase
-    only reaches 3 while grasp contact is being held, so this can't be farmed by e.g. flicking
-    the cube upward without a grasp. Height delta is measured against `env.moc_cube_home_pos_w`
-    (the cube's pose at the start of the episode, already tracked for `penalty_bystander_displacement`),
-    clamped to `max_lift` for the same critic-poisoning reason as `reward_grasp_contact`'s
-    `max_force`. The bonus fires once, on `env.moc_lift_trigger` (the step `update_moc_phase`
-    sees the height held for `lift_hold_steps`), same one-shot pattern as the grasp bonus.
-    """
-    if hasattr(env, "moc_phase") and env.moc_phase is not None:
-        active = (env.moc_phase == 3).to(torch.float32)
-    else:
-        active = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
-
-    cube_now = _target_cube_pos_w(env)
-
-    if hasattr(env, "moc_cube_home_pos_w") and env.moc_cube_home_pos_w is not None:
-        target_id = env.target_cube_id.to(torch.long).clamp(0, env.moc_cube_home_pos_w.shape[1] - 1)
-        row = _env_ids(env)
-        cube_home_z = env.moc_cube_home_pos_w[row, target_id, 2]
-    else:
-        cube_home_z = cube_now[:, 2]
-
-    delta_h = torch.clamp(cube_now[:, 2] - cube_home_z, min=0.0, max=float(max_lift))
-    continuous = (delta_h / float(max(1e-6, max_lift))) * active
-
-    if hasattr(env, "moc_lift_trigger") and env.moc_lift_trigger is not None:
-        trigger = env.moc_lift_trigger.to(torch.float32)
-    else:
-        trigger = torch.zeros_like(continuous)
-
-    reward = continuous + float(bonus) * trigger
-
-    if not hasattr(env, "extras") or env.extras is None:
-        env.extras = {}
-    env.extras["moc/lift_delta_h"] = delta_h
-
-    return reward

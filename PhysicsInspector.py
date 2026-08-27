@@ -77,6 +77,10 @@ def main():
 
     env = ManagerBasedRLEnv(cfg=env_cfg)
 
+    print("=== robot body_names ===")
+    print(env.scene["robot"].body_names)
+    print("=========================")
+
     obs, info = env.reset()
     
     env.command_from_to = torch.tensor([[1, 2]], dtype=torch.long, device=env.device)
@@ -104,7 +108,8 @@ def main():
         
         r_z = mdp.reward_reach_z_gated(
             env,
-            sigma_z=0.08,
+            k_z=0.08,
+            p=1.0,
             gate_dxy=0.16,
             gate_band=0.06,
         )

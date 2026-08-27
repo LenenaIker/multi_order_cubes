@@ -1,0 +1,399 @@
+--- a/moc_env_cfg.py
++++ b/moc_env_cfg.py
+@@ -146,6 +146,18 @@
+         ),
+     )
+ 
++    grasp_contact = RewTerm(
++        func=mdp.reward_grasp_contact,
++        weight=10.0,
++        params=dict(max_force=20.0, bonus=5.0),
++    )
++
++    lift_height = RewTerm(
++        func=mdp.reward_lift_height,
++        weight=15.0,
++        params=dict(max_lift=0.15, bonus=8.0),
++    )
++
+ @configclass
+ class EventsCfg:
+     moc_reset = EventTerm(func=mdp.moc_reset_on_reset, mode="reset", params={})
+@@ -158,6 +170,21 @@
+         params=dict(next_threshold=_NEXT_THRESHOLD, cooldown_steps=_NEXT_COOLDOWN_STEPS),
+     )
+ 
++    moc_phase_update = EventTerm(
++        func=mdp.update_moc_phase,
++        mode="interval",
++        interval_range_s=(0.0, 0.0),  # placeholder; set to (step_dt, step_dt) in __post_init__
++        is_global_time=False,
++        params=dict(
++            force_threshold=1.0,
++            grasp_hold_steps=5,
++            lift_height=0.08,
++            lift_hold_steps=10,
++            reach_exit_xy=0.08,
++            reach_exit_z=0.05,
++        ),
++    )
++
+ 
+ @configclass
+ class MOCEnvCfg(ManagerBasedRLEnvCfg):
+@@ -193,6 +220,7 @@
+ 
+         step_dt = self.decimation * self.sim.dt
+         self.events.moc_next_flag.interval_range_s = (step_dt, step_dt)
++        self.events.moc_phase_update.interval_range_s = (step_dt, step_dt)
+ 
+         self.sim.physx.bounce_threshold_velocity = 0.01
+         self.sim.physx.gpu_found_lost_aggregate_pairs_capacity = 1024 * 1024 * 4
+--- a/mdp/events.py
++++ b/mdp/events.py
+@@ -6,6 +6,7 @@
+ 
+ from .commands import latch_target_cube_from_command, sample_command_from_to
+ from .constants import CUBE_KEYS_9
++from .step_cache import get_active_cube_pos_w, get_finger_cube_contact_force
+ 
+ if TYPE_CHECKING:
+     from isaaclab.envs import ManagerBasedRLEnv
+@@ -104,6 +105,19 @@
+             _maybe_set_visibility(cube, False, inactive_env_ids)
+ 
+ 
++def _ensure_phase_buffers(env: "ManagerBasedRLEnv") -> None:
++    if not hasattr(env, "moc_phase") or env.moc_phase is None:
++        env.moc_phase = torch.ones((env.num_envs,), dtype=torch.long, device=env.device)
++    if not hasattr(env, "moc_grasp_hold") or env.moc_grasp_hold is None:
++        env.moc_grasp_hold = torch.zeros((env.num_envs,), dtype=torch.long, device=env.device)
++    if not hasattr(env, "moc_lift_hold") or env.moc_lift_hold is None:
++        env.moc_lift_hold = torch.zeros((env.num_envs,), dtype=torch.long, device=env.device)
++    if not hasattr(env, "moc_grasp_trigger") or env.moc_grasp_trigger is None:
++        env.moc_grasp_trigger = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
++    if not hasattr(env, "moc_lift_trigger") or env.moc_lift_trigger is None:
++        env.moc_lift_trigger = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
++
++
+ def moc_reset_on_reset(env: "ManagerBasedRLEnv", env_ids=None) -> None:
+     if not hasattr(env, "_moc_reset_id") or env._moc_reset_id is None:
+         env._moc_reset_id = 0
+@@ -111,6 +125,16 @@
+ 
+     randomize_cubes_on_slots(env, env_ids)
+ 
++    _ensure_phase_buffers(env)
++    reset_ids = torch.arange(env.num_envs, device=env.device) if env_ids is None else torch.as_tensor(
++        env_ids, dtype=torch.long, device=env.device
++    )
++    env.moc_phase[reset_ids] = 1
++    env.moc_grasp_hold[reset_ids] = 0
++    env.moc_lift_hold[reset_ids] = 0
++    env.moc_grasp_trigger[reset_ids] = False
++    env.moc_lift_trigger[reset_ids] = False
++
+     try:
+         if hasattr(env.scene, "write_data_to_sim"):
+             env.scene.write_data_to_sim()
+@@ -185,4 +209,76 @@
+ 
+     if trigger_ids.numel() > 0:
+         sample_command_from_to(env, env_ids=trigger_ids)
+-        env.moc_next_cooldown[trigger_ids] = int(cooldown_steps)
+\ No newline at end of file
++        env.moc_next_cooldown[trigger_ids] = int(cooldown_steps)
++
++
++def update_moc_phase(
++    env: "ManagerBasedRLEnv",
++    env_ids: torch.Tensor,
++    force_threshold: float = 1.0,
++    grasp_hold_steps: int = 5,
++    lift_height: float = 0.08,
++    lift_hold_steps: int = 10,
++    reach_exit_xy: float = 0.08,
++    reach_exit_z: float = 0.05,
++) -> None:
++    """Advances/regresses env.moc_phase (1=Reach, 2=Grasp, 3=Lift) each step.
++
++    Reads `env.moc_stable_success` and the `moc/reach_dist_xy` / `moc/reach_abs_dz` extras,
++    both set earlier this same step by the reward manager (reward_next_signal / reward_reach_z_gated),
++    the same before-event ordering `consume_next_signal` already relies on for moc_next_cooldown.
++
++    reach_exit_xy/reach_exit_z are deliberately looser than reward_next_signal's success_xy/
++    success_z, so there's a hysteresis band between "good enough to enter Grasp" and "bad enough
++    to fall back to Reach" instead of chattering right at the boundary.
++    """
++    _ensure_phase_buffers(env)
++
++    phase = env.moc_phase.index_select(0, env_ids)
++    grasp_hold = env.moc_grasp_hold.index_select(0, env_ids)
++    lift_hold = env.moc_lift_hold.index_select(0, env_ids)
++
++    if hasattr(env, "moc_stable_success") and env.moc_stable_success is not None:
++        reach_ok = env.moc_stable_success.index_select(0, env_ids).to(torch.bool)
++    else:
++        reach_ok = torch.zeros_like(phase, dtype=torch.bool)
++
++    extras = env.extras if hasattr(env, "extras") and env.extras else {}
++    dist_xy = extras.get("moc/reach_dist_xy")
++    abs_dz = extras.get("moc/reach_abs_dz")
++    if dist_xy is not None and abs_dz is not None:
++        reach_lost = (dist_xy.index_select(0, env_ids) > float(reach_exit_xy)) | (
++            abs_dz.index_select(0, env_ids) > float(reach_exit_z)
++        )
++    else:
++        reach_lost = torch.zeros_like(phase, dtype=torch.bool)
++
++    contact = get_finger_cube_contact_force(env).index_select(0, env_ids)
++    grasp_ok = (contact[:, 0] > float(force_threshold)) & (contact[:, 1] > float(force_threshold))
++    grasp_hold_new = torch.where(grasp_ok, grasp_hold + 1, torch.zeros_like(grasp_hold))
++
++    cubes_now = get_active_cube_pos_w(env).index_select(0, env_ids)
++    target_id = env.target_cube_id.index_select(0, env_ids).to(torch.long)
++    row = torch.arange(env_ids.numel(), device=env.device)
++    target_z_now = cubes_now[row, target_id, 2]
++    target_z_home = env.moc_cube_home_pos_w.index_select(0, env_ids)[row, target_id, 2]
++
++    lift_ok = grasp_ok & ((target_z_now - target_z_home) > float(lift_height))
++    lift_hold_new = torch.where(lift_ok, lift_hold + 1, torch.zeros_like(lift_hold))
++
++    grasp_trigger = (phase == 2) & (grasp_hold_new >= int(grasp_hold_steps)) & (grasp_hold < int(grasp_hold_steps))
++    lift_trigger = (phase == 3) & (lift_hold_new >= int(lift_hold_steps)) & (lift_hold < int(lift_hold_steps))
++
++    new_phase = phase.clone()
++    new_phase = torch.where((new_phase == 1) & reach_ok, torch.full_like(new_phase, 2), new_phase)
++    new_phase = torch.where(
++        (new_phase == 2) & (grasp_hold_new >= int(grasp_hold_steps)), torch.full_like(new_phase, 3), new_phase
++    )
++    new_phase = torch.where((new_phase == 2) & reach_lost, torch.full_like(new_phase, 1), new_phase)
++    new_phase = torch.where((new_phase == 3) & ~grasp_ok, torch.full_like(new_phase, 2), new_phase)
++
++    env.moc_phase[env_ids] = new_phase
++    env.moc_grasp_hold[env_ids] = grasp_hold_new
++    env.moc_lift_hold[env_ids] = lift_hold_new
++    env.moc_grasp_trigger[env_ids] = grasp_trigger
++    env.moc_lift_trigger[env_ids] = lift_trigger
+\ No newline at end of file
+--- a/mdp/rewards.py
++++ b/mdp/rewards.py
+@@ -6,7 +6,13 @@
+ import isaaclab.utils.math as math_utils
+ 
+ from .events import next_trigger_mask
+-from .step_cache import get_active_cube_pos_w, get_slots_w, get_tcp_pos_w, get_tcp_quat_w
++from .step_cache import (
++    get_active_cube_pos_w,
++    get_finger_cube_contact_force,
++    get_slots_w,
++    get_tcp_pos_w,
++    get_tcp_quat_w,
++)
+ 
+ if TYPE_CHECKING:
+     from isaaclab.envs import ManagerBasedRLEnv
+@@ -32,6 +38,20 @@
+     return torch.sqrt(torch.sum(x * x, dim=-1) + eps)
+ 
+ 
++def _phase_at_most(env: "ManagerBasedRLEnv", max_phase: int) -> torch.Tensor:
++    """1.0 while env.moc_phase <= max_phase, 0.0 once past it (all-ones before the first reset)."""
++    if not hasattr(env, "moc_phase") or env.moc_phase is None:
++        return torch.ones((env.num_envs,), dtype=torch.float32, device=env.device)
++    return (env.moc_phase <= int(max_phase)).to(torch.float32)
++
++
++def _phase_at_least(env: "ManagerBasedRLEnv", min_phase: int) -> torch.Tensor:
++    """1.0 while env.moc_phase >= min_phase, 0.0 before it (all-zeros before the first reset)."""
++    if not hasattr(env, "moc_phase") or env.moc_phase is None:
++        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
++    return (env.moc_phase >= int(min_phase)).to(torch.float32)
++
++
+ def reward_reach_xy_rational(
+     env: "ManagerBasedRLEnv",
+     k_xy: float = 0.10,
+@@ -50,7 +70,7 @@
+         env.extras = {}
+     env.extras["moc/reach_dist_xy"] = dist_xy
+ 
+-    return reward
++    return reward * _phase_at_most(env, 2)
+ 
+ 
+ def reward_reach_xy_progress(
+@@ -119,7 +139,7 @@
+     env.extras["moc/reach_gate_xy"] = gate
+     env.extras["moc/reach_abs_dz"] = torch.abs(dz)
+ 
+-    return gate * z_reward
++    return gate * z_reward * _phase_at_most(env, 2)
+ 
+ 
+ def reward_gripper_orientation_down(
+@@ -309,4 +329,89 @@
+         env.extras = {}
+     env.extras["moc/bystander_disp"] = bystander_disp.sum(dim=1)
+ 
+-    return penalty
+\ No newline at end of file
++    return penalty
++
++
++def reward_grasp_contact(
++    env: "ManagerBasedRLEnv",
++    max_force: float = 20.0,
++    bonus: float = 5.0,
++) -> torch.Tensor:
++    """Continuous reward for bilateral contact force on the target cube, plus a one-shot bonus.
++
++    Active while `env.moc_phase >= 2` (Grasp or Lift, see `mdp.events.update_moc_phase`). Uses
++    the *minimum* of the two per-finger forces (not the sum), so pushing hard with only one
++    finger scores near zero, pressuring a proper two-sided grasp of the target cube. Force is
++    read straight from `get_finger_cube_contact_force`, already filtered per-finger down to the
++    target cube prim only (a bystander cube or the table under the finger reads 0 there).
++
++    `max_force` caps the raw signal before normalizing, same pattern as `penalty_arm_joint_velocity`'s
++    `max_l2`: a physics interpenetration spike must not produce an unbounded reward and poison
++    the SAC critic. The bonus fires once, on `env.moc_grasp_trigger` (the exact step
++    `update_moc_phase` advances phase 2->3), the same one-shot pattern as `reward_next_signal`'s
++    bonus on `next_trigger_mask`.
++    """
++    active = _phase_at_least(env, 2)
++
++    contact = get_finger_cube_contact_force(env)
++    symmetric = torch.clamp(torch.minimum(contact[:, 0], contact[:, 1]), max=float(max_force))
++    continuous = (symmetric / float(max(1e-6, max_force))) * active
++
++    if hasattr(env, "moc_grasp_trigger") and env.moc_grasp_trigger is not None:
++        trigger = env.moc_grasp_trigger.to(torch.float32)
++    else:
++        trigger = torch.zeros_like(continuous)
++
++    reward = continuous + float(bonus) * trigger
++
++    if not hasattr(env, "extras") or env.extras is None:
++        env.extras = {}
++    env.extras["moc/grasp_force_min"] = symmetric
++
++    return reward
++
++
++def reward_lift_height(
++    env: "ManagerBasedRLEnv",
++    max_lift: float = 0.15,
++    bonus: float = 8.0,
++) -> torch.Tensor:
++    """Continuous reward for raising the target cube above its reset height, plus a one-shot bonus.
++
++    Active only while `env.moc_phase == 3` (Lift, see `mdp.events.update_moc_phase`) — phase
++    only reaches 3 while grasp contact is being held, so this can't be farmed by e.g. flicking
++    the cube upward without a grasp. Height delta is measured against `env.moc_cube_home_pos_w`
++    (the cube's pose at the start of the episode, already tracked for `penalty_bystander_displacement`),
++    clamped to `max_lift` for the same critic-poisoning reason as `reward_grasp_contact`'s
++    `max_force`. The bonus fires once, on `env.moc_lift_trigger` (the step `update_moc_phase`
++    sees the height held for `lift_hold_steps`), same one-shot pattern as the grasp bonus.
++    """
++    if hasattr(env, "moc_phase") and env.moc_phase is not None:
++        active = (env.moc_phase == 3).to(torch.float32)
++    else:
++        active = torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
++
++    cube_now = _target_cube_pos_w(env)
++
++    if hasattr(env, "moc_cube_home_pos_w") and env.moc_cube_home_pos_w is not None:
++        target_id = env.target_cube_id.to(torch.long).clamp(0, env.moc_cube_home_pos_w.shape[1] - 1)
++        row = _env_ids(env)
++        cube_home_z = env.moc_cube_home_pos_w[row, target_id, 2]
++    else:
++        cube_home_z = cube_now[:, 2]
++
++    delta_h = torch.clamp(cube_now[:, 2] - cube_home_z, min=0.0, max=float(max_lift))
++    continuous = (delta_h / float(max(1e-6, max_lift))) * active
++
++    if hasattr(env, "moc_lift_trigger") and env.moc_lift_trigger is not None:
++        trigger = env.moc_lift_trigger.to(torch.float32)
++    else:
++        trigger = torch.zeros_like(continuous)
++
++    reward = continuous + float(bonus) * trigger
++
++    if not hasattr(env, "extras") or env.extras is None:
++        env.extras = {}
++    env.extras["moc/lift_delta_h"] = delta_h
++
++    return reward
+\ No newline at end of file
+--- a/mdp/step_cache.py
++++ b/mdp/step_cache.py
+@@ -195,6 +195,37 @@
+ ) -> tuple[torch.Tensor, torch.Tensor]:
+     return get_tcp_pos_w(env, ee_frame_name), get_tcp_quat_w(env, ee_frame_name, mode=quat_mode)
+ 
++def get_finger_cube_contact_force(env: "ManagerBasedRLEnv") -> torch.Tensor:
++    """Contact force magnitude [left, right] against the target cube only, shape (num_envs, 2).
++
++    Uses the per-cube filtered force_matrix_w from the two finger ContactSensors (see
++    config/ur10_gripper/moc_ur10_env_cfg.py), gathered down to whichever of the 9 cube prims is
++    this env's current target. A finger pressing on a bystander cube or the table reads 0 here.
++    """
++    _invalidate_cache_if_needed(env)
++    key = "finger_cube_contact_force"
++    if key in env._moc_cache:
++        return env._moc_cache[key]
++
++    target_id = env.target_cube_id.to(torch.long)
++    active_idx = env.active_cube_indices
++    row = torch.arange(env.num_envs, device=env.device)
++    target_global_idx = active_idx[row, target_id]
++
++    left = env.scene["left_finger_contact"].data.force_matrix_w
++    right = env.scene["right_finger_contact"].data.force_matrix_w
++
++    left_mag = torch.linalg.vector_norm(left[:, 0], dim=-1)
++    right_mag = torch.linalg.vector_norm(right[:, 0], dim=-1)
++
++    left_on_target = left_mag.gather(1, target_global_idx.view(-1, 1)).squeeze(1)
++    right_on_target = right_mag.gather(1, target_global_idx.view(-1, 1)).squeeze(1)
++
++    out = torch.stack([left_on_target, right_on_target], dim=1)
++    env._moc_cache[key] = out
++    return out
++
++
+ def invalidate_moc_cache(env: "ManagerBasedRLEnv") -> None:
+     _ensure_cache(env)
+     env._moc_cache.clear()
+--- a/config/ur10_gripper/moc_ur10_env_cfg.py
++++ b/config/ur10_gripper/moc_ur10_env_cfg.py
+@@ -7,7 +7,7 @@
+ from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
+ from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+ 
+-from isaaclab.sensors import FrameTransformerCfg
++from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
+ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
+ from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
+ from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
+@@ -109,6 +109,20 @@
+             getattr(self.scene, name).init_state.pos = parked_pos
+ 
+         self.scene.robot = UR10e_ROBOTIQ_GRIPPER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
++        self.scene.robot.spawn.rigid_props.activate_contact_sensors = True
++
++        cube_filter_paths = [f"{{ENV_REGEX_NS}}/{key}" for key in mdp.CUBE_KEYS_9]
++
++        self.scene.left_finger_contact = ContactSensorCfg(
++            prim_path="{ENV_REGEX_NS}/Robot/left_inner_finger",
++            filter_prim_paths_expr=cube_filter_paths,
++            force_threshold=1.0,
++        )
++        self.scene.right_finger_contact = ContactSensorCfg(
++            prim_path="{ENV_REGEX_NS}/Robot/right_inner_finger",
++            filter_prim_paths_expr=cube_filter_paths,
++            force_threshold=1.0,
++        )
+ 
+ 
+         marker_cfg = FRAME_MARKER_CFG.copy()

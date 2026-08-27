@@ -48,6 +48,21 @@ def latch_target_cube_from_command(
     env.target_cube_id[env_ids] = target_id
 
 
+def set_command_from_to(env: "ManagerBasedRLEnv", from_slot_1based: int, to_slot_1based: int) -> None:
+    """Force the same (from, to) command on every env and latch the target cube for it.
+
+    External entry point for an outside caller (e.g. a Cosmos Reason planner, or manual
+    debugging) to hand the policy a specific command instead of letting it self-sample one.
+    """
+    _ensure_command_buffers(env)
+    _ensure_slot_mapping_buffers(env)
+
+    env.command_from_to[:, 0] = int(from_slot_1based)
+    env.command_from_to[:, 1] = int(to_slot_1based)
+
+    latch_target_cube_from_command(env)
+
+
 def sample_command_from_to(
     env: "ManagerBasedRLEnv",
     env_ids: torch.Tensor | None = None,

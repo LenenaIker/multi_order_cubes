@@ -219,15 +219,34 @@ def main():
 
     agent_cfg_raw = load_yaml(str(cfg_path))
 
-    agent_cfg = process_sb3_cfg(agent_cfg_raw, num_envs=sb3_env.num_envs)  
+    agent_cfg = process_sb3_cfg(agent_cfg_raw, num_envs=sb3_env.num_envs)
+
+    # gradient_steps in cfg/sb3_sac.yaml is tuned against a num_envs=64 baseline: with
+    # train_freq=1, SAC does `gradient_steps` updates per env.step() call regardless of
+    # num_envs, so more envs means fewer calls for the same total_timesteps, and thus
+    # proportionally fewer gradient updates unless we scale gradient_steps to compensate.
+    # This keeps total gradient updates over the whole run roughly constant across
+    # num_envs choices, so runs stay comparable and only the (parallel) env-stepping
+    # speeds up with more envs, not the amount of actual training that happens.
+    if "gradient_steps" in agent_cfg:
+        _baseline_num_envs = 64
+        scale = max(1, sb3_env.num_envs) / _baseline_num_envs
+        agent_cfg["gradient_steps"] = max(1, round(agent_cfg["gradient_steps"] * scale))
 
 
-    
+    # Desired checkpoint interval in REAL env timesteps (across all parallel envs).
+    checkpoint_every_timesteps = max(10_000, sb3_env.num_envs * 200)
+    # CheckpointCallback counts *calls* to _on_step (one per vectorized env.step(),
+    # i.e. num_envs real timesteps each), not real timesteps directly, so we convert.
     checkpoint_cb = CheckpointCallback(
-        save_freq=max(10_000, sb3_env.num_envs * 200),  
+        save_freq=max(1, checkpoint_every_timesteps // sb3_env.num_envs),
         save_path=str(ckpt_dir),
         name_prefix="sac",
-        save_replay_buffer=True,
+        # Replay buffer is preallocated to buffer_size (2M transitions), so each dump is
+        # ~1GB flat regardless of how full it actually is, and CheckpointCallback never
+        # deletes old ones. With only ~69GB free on disk, saving it every 12.8k steps
+        # would fill the disk and kill a long unattended run well before it converges.
+        save_replay_buffer=False,
         save_vecnormalize=not args.no_vecnormalize,
     )
     info_tb_cb = IsaacInfoTensorboardCallback(log_every=100)

@@ -99,11 +99,11 @@ class RewardsCfg:
         params=dict(k_z=0.06, p=1.0, gate_dxy=0.18, gate_band=0.05),
     )
 
-    # orientation_down = RewTerm(
-    #     func=mdp.reward_gripper_orientation_down,
-    #     weight=4.0,
-    #     params=dict(),
-    # )
+    approach_forward = RewTerm(
+        func=mdp.reward_gripper_approach_forward,
+        weight=6.0,
+        params=dict(k_dir=0.35, p=1.0),
+    )
 
     next_signal = RewTerm(
         func=mdp.reward_next_signal,

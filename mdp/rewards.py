@@ -100,7 +100,10 @@ def reward_reach_z_gated(
 
     Target is the cube's own center (no extra standoff): `ee_frame`'s body_offset already
     places the TCP at the intended grasp point (see config/ur10_gripper/moc_ur10_env_cfg.py),
-    so once the gripper is oriented correctly, dz=0 is the right place, not a few cm above it.
+    so once the gripper is oriented correctly (horizontally, approach axis pointing forward
+    toward the table, world +X, not down, see `reward_gripper_approach_forward`'s docstring
+    for why a vertical/top-down approach is physically wrong for this gripper's finger
+    geometry), dz=0 is the right place, not a few cm above it.
     """
     tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
     cube = _target_cube_pos_w(env)
@@ -122,21 +125,47 @@ def reward_reach_z_gated(
     return gate * z_reward
 
 
-def reward_gripper_orientation_down(
+def reward_gripper_approach_forward(
     env: "ManagerBasedRLEnv",
     ee_frame_name: str = "ee_frame",
+    k_dir: float = 0.35,
+    p: float = 1.0,
 ) -> torch.Tensor:
-    """Rewards aligning the gripper's approach axis with world -Z (pointing straight down).
+    """Rewards the gripper's approach axis pointing horizontally toward the table (world +X),
+    not down and not toward some other, unconstrained horizontal heading.
 
-    Purely geometric (dot product with the vertical, world-frame only), no cube size/color/
-    identity involved, so this doesn't touch the "no object-semantic observations" boundary.
+    Purely geometric (the approach axis's own world-frame components against a fixed target
+    vector), no cube size/color/identity involved, so this doesn't touch the "no object-
+    semantic observations" boundary. The target is a **fixed** world direction, not "toward
+    the current target cube": the robot base sits at this env's origin with identity rotation
+    (`UR10e_ROBOTIQ_GRIPPER_CFG`'s own `init_state`, unmodified here) and all 4 slots sit at
+    x=0.87 with y in [-0.3, 0.3] (`self.slot_positions`, set in `moc_env_cfg.py`'s
+    `__post_init__`), i.e. the table is always in the +X direction from the base regardless of
+    which slot is targeted, so one fixed heading covers every command, no per-episode
+    cube-relative computation needed.
 
-    Motivation: `reach_z_gated`'s target is the cube's center, reachable by the TCP only if
-    the gripper's local +Z axis (the same axis `ee_frame`'s 0.18m body_offset is defined
-    along, see config/ur10_gripper/moc_ur10_env_cfg.py) is actually pointing down at the
-    table. Nothing else in the reward stack scores orientation at all, and the robot's stock
-    "ready" home pose (from UR10e_CFG) isn't authored to point down, so there was previously
-    zero incentive, direct or indirect, to ever rotate into a grasp-capable orientation.
+    Was previously heading-agnostic (`reward_gripper_approach_horizontal`, only constrained the
+    vertical component to ~0). That converged, but to an arbitrary horizontal heading (observed
+    pointing left, world +Y, 90 degrees off from the intended forward/+X approach) since nothing
+    in the reward stack constrained *which* horizontal direction to use. Replaced the
+    vertical-only rational falloff with one rational falloff on the full vector distance to a
+    fixed target direction `(1, 0, 0)`: since `approach_dir_w` is always unit-length, driving
+    this distance to 0 simultaneously drives the vertical component to 0 *and* the heading to
+    forward, both in the same term (distance between two unit vectors is 0 only when they're
+    identical). Same family as `reward_reach_xy_rational`/`reward_reach_z_gated` (see the
+    latter's docstring for the full Gaussian-vs-rational reasoning) for the same reason:
+    nonzero gradient at any distance, unlike a Gaussian which goes flat a few sigma out.
+    `k_dir=0.35` is a first guess (half-max reward at a combined vertical+heading deviation of
+    about 20 degrees; max possible distance between two unit vectors is 2, i.e. exactly
+    opposite directions), not validated, tune after a short training run.
+
+    Was originally `reward_gripper_orientation_down` and rewarded straight down (world -Z),
+    before that was found to be physically wrong for this gripper: the real fingers extend a
+    few cm past the 0.18m TCP reference point along the same local +Z axis the offset is
+    defined on (see config/ur10_gripper/moc_ur10_env_cfg.py), so a vertical approach drives the
+    fingertips below the TCP height (the cube's center, ~3cm above the table) and into the
+    table itself (see `penalty_table_proximity`'s docstring for the observed consequence when
+    that version was live).
     """
     quat_w = get_tcp_quat_w(env, ee_frame_name=ee_frame_name, mode="avg")
 
@@ -144,12 +173,18 @@ def reward_gripper_orientation_down(
     approach_axis = local_approach_axis.view(1, 3).expand(env.num_envs, 3)
     approach_dir_w = math_utils.quat_apply(quat_w, approach_axis)
 
-    alignment = -approach_dir_w[:, 2]
-    reward = 0.5 * (alignment + 1.0)
+    target_dir_w = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32, device=env.device)
+    target_dir_w = target_dir_w.view(1, 3).expand(env.num_envs, 3)
+
+    dist = _safe_norm(approach_dir_w - target_dir_w)
+    k = float(max(1e-6, k_dir))
+    pp = float(max(1e-3, p))
+    reward = 1.0 / (1.0 + torch.pow(dist / k, pp))
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/gripper_down_align"] = alignment
+    env.extras["moc/gripper_forward_align"] = approach_dir_w[:, 0]
+    env.extras["moc/gripper_vert"] = approach_dir_w[:, 2]
 
     return reward
 
@@ -169,13 +204,18 @@ def penalty_table_proximity(
     discourages overshooting past it toward the table.
 
     Added after visually observing the gripper and arm making much more contact with the
-    table once orientation_down (reward_gripper_orientation_down) started actually working:
-    before that, the arm rarely got close enough to the table with a valid approach angle to
-    exercise this failure mode. Neither table contact nor arm self-collision currently have
-    any physical consequence (`enabled_self_collisions=False`, `activate_contact_sensors=False`
-    on UR10e_ROBOTIQ_GRIPPER_CFG), so nothing previously discouraged it. `max_excess` caps the
-    penalty the same way `penalty_bystander_displacement` does, so a single-step depenetration
-    spike near contact can't produce an unbounded per-step value.
+    table once the (now-removed) vertical top-down orientation reward started actually
+    working: pointing the gripper's local +Z straight down drove the real fingertips, which
+    extend a few cm past the 0.18m TCP reference along that same axis, into the table, since
+    the TCP target sits at the cube's center (~3cm above the table). The current orientation
+    reward (`reward_gripper_approach_forward`) targets a horizontal, forward approach instead,
+    which should keep that finger overshoot to the side rather than downward, but this penalty
+    is kept as a safety net regardless of approach heading. Neither table contact nor arm
+    self-collision currently have any physical consequence (`enabled_self_collisions=False`,
+    `activate_contact_sensors=False` on UR10e_ROBOTIQ_GRIPPER_CFG), so nothing previously
+    discouraged it. `max_excess` caps the penalty the same way `penalty_bystander_displacement`
+    does, so a single-step depenetration spike near contact can't produce an unbounded per-step
+    value.
     """
     tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
     height = tip[:, 2] - env.scene.env_origins[:, 2]

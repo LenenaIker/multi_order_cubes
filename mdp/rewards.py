@@ -284,3 +284,37 @@ def penalty_bystander_displacement(
     env.extras["moc/bystander_disp"] = bystander_disp.sum(dim=1)
 
     return penalty
+
+
+def reward_object_lifted(
+    env: "ManagerBasedRLEnv",
+    target_height: float = 0.10,
+    tolerance: float = 0.001,
+) -> torch.Tensor:
+    """Dense reward for lifting the target cube above its resting height.
+
+    Ramps linearly 0 -> 1 as the target cube's height above its own recorded home Z (see
+    `moc_cube_home_pos_w`, set once per episode in `mdp/events.py`) goes from `tolerance` to
+    `target_height`, then saturates at 1.0. Chosen over a binary "is lifted" flag so there is
+    gradient across the whole climb, not just at the instant the threshold is crossed.
+    Saturating (rather than rewarding height unboundedly) mirrors the `max_excess` cap in
+    `penalty_bystander_displacement`: a physics-glitch fling shouldn't out-earn a real lift.
+
+    First step toward Grasp-Lift, deliberately no phase observation and no contact sensor
+    (see project memory: Isaac Lab's own Lift task does the same with its `object_is_lifted`).
+    """
+    if not hasattr(env, "moc_cube_home_pos_w") or env.moc_cube_home_pos_w is None:
+        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    delta_z = get_active_cube_pos_w(env)[:, :, 2] - env.moc_cube_home_pos_w[:, :, 2]
+    target_id = env.target_cube_id.to(torch.long).clamp(0, delta_z.shape[1] - 1)
+    target_delta_z = delta_z.gather(1, target_id.view(-1, 1)).squeeze(1)
+
+    progress = (target_delta_z - float(tolerance)) / (float(target_height) - float(tolerance))
+    reward = torch.clamp(progress, min=0.0, max=1.0)
+
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras["moc/lift_delta_z"] = target_delta_z
+
+    return reward

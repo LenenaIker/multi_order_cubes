@@ -100,6 +100,12 @@ class RewardsCfg:
     )
 
 
+    object_lifted = RewTerm(
+        func=mdp.reward_object_lifted,
+        weight=5.0,
+        params=dict(target_height=0.10, tolerance=0.005),
+    )
+
     next_signal = RewTerm(
         func=mdp.reward_next_signal,
         weight=1.0,

@@ -6,7 +6,7 @@ import torch
 import isaaclab.utils.math as math_utils
 
 from .events import next_trigger_mask
-from .step_cache import get_active_cube_pos_w, get_slots_w, get_tcp_pos_w, get_tcp_quat_w
+from .step_cache import get_active_cube_pos_w, get_finger_contact_force_w, get_slots_w, get_tcp_pos_w, get_tcp_quat_w
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -89,6 +89,7 @@ def reward_reach_z_gated(
     p: float = 1.0,
     gate_dxy: float = 0.18,
     gate_band: float = 0.05,
+    flat_margin: float = 0.03,
 ) -> torch.Tensor:
     """Rational falloff (same family as `reward_reach_xy_rational`), not a Gaussian.
 
@@ -97,6 +98,14 @@ def reward_reach_z_gated(
     (confirmed: dz sat flat at ~0.45m for a full 3M-step run with sigma_z=0.06, ~7.5 sigma
     away, reward numerically underflowing to 0). The rational form has fat tails and a
     nonzero gradient at any distance, so it can actually shape the initial descent.
+
+    `flat_margin` clips the falloff's input distance to 0 within that radius of the cube's
+    own center, so the reward is exactly 1.0 anywhere inside it instead of peaking only at
+    dz=0 (the cube's own center, i.e. inside its solid volume). Without this, the optimum
+    sat inside the cube, giving a live gradient to push the TCP down into solid geometry
+    with nothing rewarding a hover just above it. `flat_margin=0.03` was picked to clear the
+    largest cube variant's half-height with margin. `k_z`/`p` are unchanged from before and
+    still only control how the reward falls off beyond that flat radius, not its width.
 
     Target is the cube's own center (no extra standoff): `ee_frame`'s body_offset already
     places the TCP at the intended grasp point (see config/ur10_gripper/moc_ur10_env_cfg.py).
@@ -111,7 +120,8 @@ def reward_reach_z_gated(
     dz = tip[:, 2] - cube[:, 2]
     k = float(max(1e-6, k_z))
     pp = float(max(1e-3, p))
-    z_reward = 1.0 / (1.0 + torch.pow(torch.abs(dz) / k, pp))
+    d_eff = torch.clamp(torch.abs(dz) - float(max(0.0, flat_margin)), min=0.0)
+    z_reward = 1.0 / (1.0 + torch.pow(d_eff / k, pp))
 
     gate = torch.sigmoid((float(gate_dxy) - dist_xy) / float(max(1e-6, gate_band)))
 
@@ -284,6 +294,95 @@ def penalty_bystander_displacement(
     env.extras["moc/bystander_disp"] = bystander_disp.sum(dim=1)
 
     return penalty
+
+
+def diag_grip_distance(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    gripper_joint_name: str = "finger_joint",
+    closed_threshold: float = 0.7,
+) -> torch.Tensor:
+    """Diagnostics only, register with weight=0.0 so it never affects training.
+
+    Logs where the gripper is actually closing relative to the target cube: masks the
+    reach distance/offset by which envs currently have their gripper past
+    `closed_threshold` closedness (normalized against the joint's own live position
+    limits, not a hardcoded angle), so `moc/dist_xy_at_grip` / `moc/dx_at_grip` /
+    `moc/dy_at_grip` reflect only the moments the policy chooses to close, not the whole
+    episode. `moc/grip_frac` (fraction of envs gripping this logged snapshot) is logged
+    alongside it: when it's near 0, the other four values are near-meaningless (division
+    by a clamped denominator when nobody's gripping falls back to 0, which would otherwise
+    look like "gripping dead-center" rather than "nobody was gripping").
+
+    Exists to check the suspicion that the policy learned to grip beside the cube rather
+    than centered on it, without needing a new training run's reward shape to find out.
+    """
+    robot = env.scene[asset_name]
+    joint_ids, _ = robot.find_joints([gripper_joint_name])
+    jid = joint_ids[0]
+
+    joint_pos = robot.data.joint_pos[:, jid]
+    lower = robot.data.joint_pos_limits[:, jid, 0]
+    upper = robot.data.joint_pos_limits[:, jid, 1]
+    closed_frac = ((joint_pos - lower) / (upper - lower).clamp(min=1e-6)).clamp(0.0, 1.0)
+    gripping = (closed_frac > float(closed_threshold)).to(torch.float32)
+    n_gripping = gripping.sum().clamp(min=1.0)
+
+    tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
+    cube = _target_cube_pos_w(env)
+    offset_xy = tip[:, :2] - cube[:, :2]
+    dist_xy = _safe_norm(offset_xy)
+    dist_z = torch.abs(tip[:, 2] - cube[:, 2])
+
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras["moc/grip_frac"] = gripping
+    env.extras["moc/dist_xy_at_grip"] = ((dist_xy * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["moc/dist_z_at_grip"] = ((dist_z * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["moc/dx_at_grip"] = ((offset_xy[:, 0] * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["moc/dy_at_grip"] = ((offset_xy[:, 1] * gripping).sum() / n_gripping).expand(env.num_envs)
+
+    return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+
+def reward_grasp_contact(
+    env: "ManagerBasedRLEnv",
+    success_xy: float = 0.05,
+    success_z: float = 0.03,
+    force_cap: float = 20.0,
+) -> torch.Tensor:
+    """Dense reward for squeezing the gripper closed on the target cube specifically.
+
+    Uses `min(left_force, right_force)`, not sum or max, so a single finger brushing the
+    cube's side or another object can't score alone; a real grasp has both fingers loaded.
+    Gated by the same reach success zone `reward_next_signal` uses (TCP already within
+    `success_xy`/`success_z` of the target cube), so contact against the table or a
+    bystander cube during approach doesn't score, only squeezing while positioned on the
+    actual target.
+
+    Structurally safe from "squeeze fingers against each other with nothing in between":
+    `enabled_self_collisions=False` on the gripper means closing on empty air reports
+    exactly zero force on both sensors (confirmed live via ContactSensorInspector.py,
+    2026-08-29), so nonzero force on both fingers can only come from a real object between
+    them.
+    """
+    dist_xy = env.extras.get("moc/reach_dist_xy") if hasattr(env, "extras") and env.extras else None
+    abs_dz = env.extras.get("moc/reach_abs_dz") if hasattr(env, "extras") and env.extras else None
+
+    if dist_xy is None or abs_dz is None:
+        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    in_position = (dist_xy < float(success_xy)) & (abs_dz < float(success_z))
+
+    force = get_finger_contact_force_w(env)
+    grip_force = torch.amin(force, dim=1)
+    reward = (grip_force.clamp(min=0.0, max=float(force_cap)) / float(force_cap)) * in_position.to(torch.float32)
+
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras["moc/grasp_force"] = grip_force
+
+    return reward
 
 
 def reward_object_lifted(

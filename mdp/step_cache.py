@@ -195,6 +195,24 @@ def get_tcp_pose_w(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     return get_tcp_pos_w(env, ee_frame_name), get_tcp_quat_w(env, ee_frame_name, mode=quat_mode)
 
+def get_finger_contact_force_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    _invalidate_cache_if_needed(env)
+    key = "finger_contact_force_w"
+    if key in env._moc_cache:
+        return env._moc_cache[key]
+
+    forces = []
+    for sensor_name in ("left_finger_contact", "right_finger_contact"):
+        history = env.scene[sensor_name].data.net_forces_w_history
+        # (num_envs, T, 1, 3) -> peak contact-force magnitude over the window, per env
+        peak = torch.linalg.norm(history, dim=-1).amax(dim=(1, 2))
+        forces.append(peak)
+
+    result = torch.stack(forces, dim=1)  # (num_envs, 2): [left, right]
+    env._moc_cache[key] = result
+    return result
+
+
 def invalidate_moc_cache(env: "ManagerBasedRLEnv") -> None:
     _ensure_cache(env)
     env._moc_cache.clear()

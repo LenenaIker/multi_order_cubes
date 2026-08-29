@@ -10,6 +10,7 @@ from isaaclab.managers import SceneEntityCfg
 from .step_cache import (
     get_active_cube_pos_w,
     get_active_cube_quat_w,
+    get_finger_contact_force_w,
     get_nearest_slot_for_active_cubes_xy,
     get_slots_w,
     get_tcp_pose_w,
@@ -17,6 +18,9 @@ from .step_cache import (
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
+
+
+_FINGER_FORCE_CAP = 20.0
 
 
 def slot_positions_in_base_frame(
@@ -165,6 +169,11 @@ def moc_phase_obs(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return torch.zeros((env.num_envs, 1), dtype=torch.float32, device=env.device)
 
 
+def finger_contact_force_obs(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    force = get_finger_contact_force_w(env)
+    return force.clamp(min=0.0, max=_FINGER_FORCE_CAP) / _FINGER_FORCE_CAP
+
+
 def policy_obs(
     env: "ManagerBasedRLEnv",
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
@@ -182,6 +191,7 @@ def policy_obs(
             stable_success_hint(env),
             moc_phase_obs(env),
             next_cooldown_obs(env),
+            finger_contact_force_obs(env),
         ],
         dim=1,
     )

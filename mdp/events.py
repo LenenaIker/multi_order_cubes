@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+from isaaclab.sim.schemas import activate_contact_sensors
 
 from .commands import latch_target_cube_from_command, sample_command_from_to
 from .constants import CUBE_KEYS_9
@@ -12,6 +13,25 @@ if TYPE_CHECKING:
 
 
 _COLOR_BASE = torch.tensor([0, 3, 6], dtype=torch.long)
+
+_FINGER_LOCAL_PATHS = (
+    "Robot/ee_link/left_inner_finger",
+    "Robot/ee_link/right_inner_finger",
+)
+
+
+def activate_finger_contact_sensors(env: "ManagerBasedRLEnv", env_ids) -> None:
+    """Prestartup event: apply PhysxContactReportAPI to the two gripper finger bodies.
+
+    Scoped per finger prim path, never the robot root -- applying it at the robot
+    root walks every rigid-body prim under the robot and crashes on `base_link`
+    (the fixed articulation root, which lacks the PhysX attribute the walker
+    expects). Runs after the scene is spawned but before `sim.reset()` initializes
+    the ContactSensor (the "prestartup" event window), which is the required order.
+    """
+    for env_prim_path in env.scene.env_prim_paths:
+        for local_path in _FINGER_LOCAL_PATHS:
+            activate_contact_sensors(f"{env_prim_path}/{local_path}", threshold=1.0)
 
 
 def _maybe_set_visibility(cube, visible: bool, env_ids: torch.Tensor) -> None:

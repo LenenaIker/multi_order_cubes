@@ -7,7 +7,7 @@ from isaaclab.envs.mdp.actions import JointPositionToLimitsActionCfg
 from isaaclab.controllers.differential_ik_cfg import DifferentialIKControllerCfg
 from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 
-from isaaclab.sensors import FrameTransformerCfg
+from isaaclab.sensors import ContactSensorCfg, FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.schemas.schemas_cfg import RigidBodyPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import UsdFileCfg
@@ -37,6 +37,13 @@ _RIGID_PROPS = RigidBodyPropertiesCfg(
     max_linear_velocity=1000.0,
     max_depenetration_velocity=5.0,
     disable_gravity=False,
+    # Without this, a cube held under a constant (unchanging) grip loses kinetic
+    # energy and PhysX puts it to sleep, which silently zeroes out its contact-force
+    # reporting even though the physical contact is still real -- exactly the state a
+    # grasp signal most needs to stay nonzero during. Confirmed live via
+    # ContactSensorInspector.py (2026-08-29): force stopped decaying to 0 under a
+    # held squeeze once this was set.
+    sleep_threshold=0.0,
 )
 
 
@@ -110,6 +117,16 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
 
         self.scene.robot = UR10e_ROBOTIQ_GRIPPER_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
 
+        self.scene.left_finger_contact = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/ee_link/left_inner_finger",
+            force_threshold=1.0,
+            history_length=self.decimation,
+        )
+        self.scene.right_finger_contact = ContactSensorCfg(
+            prim_path="{ENV_REGEX_NS}/Robot/ee_link/right_inner_finger",
+            force_threshold=1.0,
+            history_length=self.decimation,
+        )
 
         marker_cfg = FRAME_MARKER_CFG.copy()
         marker_cfg.prim_path = "/Visuals/TcpFrame"

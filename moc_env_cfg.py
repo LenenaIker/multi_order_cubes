@@ -14,6 +14,7 @@ from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import FrameTransformerCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
 from isaaclab.utils import configclass
@@ -29,6 +30,8 @@ _NEXT_COOLDOWN_STEPS = 30
 class ObjectTableSceneCfg(InteractiveSceneCfg):
     robot: ArticulationCfg = MISSING
     ee_frame: FrameTransformerCfg = MISSING
+    left_finger_contact: ContactSensorCfg = MISSING
+    right_finger_contact: ContactSensorCfg = MISSING
 
     table = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
@@ -96,7 +99,7 @@ class RewardsCfg:
     reach_z = RewTerm(
         func=mdp.reward_reach_z_gated,
         weight=9.5,
-        params=dict(k_z=0.06, p=1.0, gate_dxy=0.18, gate_band=0.05),
+        params=dict(k_z=0.06, p=1.0, gate_dxy=0.18, gate_band=0.05, flat_margin=0.03),
     )
 
 
@@ -104,6 +107,12 @@ class RewardsCfg:
         func=mdp.reward_object_lifted,
         weight=5.0,
         params=dict(target_height=0.10, tolerance=0.005),
+    )
+
+    grasp_contact = RewTerm(
+        func=mdp.reward_grasp_contact,
+        weight=5.0,
+        params=dict(success_xy=0.05, success_z=0.03, force_cap=20.0),
     )
 
     next_signal = RewTerm(
@@ -117,6 +126,16 @@ class RewardsCfg:
             bonus=5.0,
             penalty=-0.03,
         ),
+    )
+
+    grip_distance_diag = RewTerm(
+        # Isaac Lab's RewardManager skips any term whose weight is exactly 0.0 (a micro-
+        # optimization) without ever calling its function, so a real "does nothing" weight
+        # can't be 0.0. Any nonzero value is harmless here regardless: the function always
+        # returns torch.zeros(...), so weight * 0 == 0 no matter what weight is.
+        func=mdp.diag_grip_distance,
+        weight=1.0,
+        params=dict(closed_threshold=0.7),
     )
 
     bystander_displacement = RewTerm(
@@ -157,6 +176,12 @@ class EventsCfg:
         interval_range_s=(0.0, 0.0),  # placeholder; set to (step_dt, step_dt) in __post_init__
         is_global_time=False,
         params=dict(next_threshold=_NEXT_THRESHOLD, cooldown_steps=_NEXT_COOLDOWN_STEPS),
+    )
+
+    moc_activate_finger_contacts = EventTerm(
+        func=mdp.activate_finger_contact_sensors,
+        mode="prestartup",
+        params={},
     )
 
 

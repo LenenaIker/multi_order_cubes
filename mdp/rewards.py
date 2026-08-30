@@ -393,6 +393,67 @@ def diag_grip_distance(
     return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
 
 
+def reward_grip_readiness(
+    env: "ManagerBasedRLEnv",
+    asset_name: str = "robot",
+    gripper_joint_name: str = "finger_joint",
+    success_xy: float = 0.2,
+    success_z: float = 0.2,
+    weight: float = 3.0,
+) -> torch.Tensor:
+    """Dense, easier-to-reach stepping stone toward reward_grasp_contact.
+
+    Rewards closing the gripper while positioned near the target cube, regardless of
+    whether contact force or pinch direction actually validate. Continuous in both axes:
+    `closed_frac` gives gradient toward closing further (not a binary "closed" flag), and
+    position itself ramps linearly from 0 at `dist == success_xy/z` (the outer edge) up to
+    1 at `dist == 0` (dead center), instead of a flat step function that pays the same
+    regardless of where inside the zone the gripper closes.
+
+    A flat gate (dist < success_xy/z, pay the same regardless of exact position) rewarded
+    closing anywhere within the zone equally, so the policy had no reason to keep
+    centering once merely inside it -- with success_xy/z=0.5 that produced grip_frac~0.98
+    (closing almost constantly) with zero real contact (run_20260830_183849). A steeper
+    Cauchy-shaped falloff (`1/(1+(d/k)^2)`, k=0.10) was also tried and reverted: it made
+    `dist_xy_at_grip` end worse (0.215m vs this ramp's 0.093m) and `grip_frac` collapse
+    further (0.081 vs 0.224) without any gain in `rewards/grasp_contact`, which stayed at
+    the same noise floor (~0.0003-0.002) across every variant tried (flat gates at three
+    widths, this linear ramp, and the Cauchy falloff) -- see project memory around
+    run_20260830_193430 / run_20260830_195915. The plain linear ramp gave the best
+    empirical precision-at-grip of everything tried, so it's the one kept for the 20M run.
+
+    Deliberately weighted well below WEIGHT_GRASP: this is meant to nudge the policy to
+    spend time closing near the target instead of only hovering in pre-grasp forever,
+    without outcompeting the real grasp reward once a genuine pinch becomes reachable.
+    Closing near the cube without ever actually squeezing on it was exactly how a prior
+    run (run_20260830_152133) found a cheap local optimum, so this stays intentionally
+    weak and graded by proximity rather than paid flat from anywhere nearby.
+    """
+    dist_xy = env.extras.get("moc/reach_dist_xy") if hasattr(env, "extras") and env.extras else None
+    abs_dz = env.extras.get("moc/reach_abs_dz") if hasattr(env, "extras") and env.extras else None
+
+    if dist_xy is None or abs_dz is None:
+        return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
+
+    proximity_xy = (1.0 - dist_xy / float(success_xy)).clamp(0.0, 1.0)
+    proximity_z = (1.0 - abs_dz / float(success_z)).clamp(0.0, 1.0)
+    proximity = proximity_xy * proximity_z
+
+    robot = env.scene[asset_name]
+    joint_ids, _ = robot.find_joints([gripper_joint_name])
+    jid = joint_ids[0]
+    joint_pos = robot.data.joint_pos[:, jid]
+    lower = robot.data.joint_pos_limits[:, jid, 0]
+    upper = robot.data.joint_pos_limits[:, jid, 1]
+    closed_frac = ((joint_pos - lower) / (upper - lower).clamp(min=1e-6)).clamp(0.0, 1.0)
+
+    reward = closed_frac * proximity
+
+    _log_weighted_reward(env, "grip_readiness", reward, weight)
+
+    return reward
+
+
 def reward_grasp_contact(
     env: "ManagerBasedRLEnv",
     success_xy: float = 0.05,

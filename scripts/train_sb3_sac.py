@@ -37,6 +37,19 @@ def parse_args():
         default=0.0,
         help="Only used with --checkpoint and --lr_start. Value the linear schedule decays to.",
     )
+    parser.add_argument(
+        "--ent_coef_start",
+        type=float,
+        default=None,
+        help=(
+            "Only used with --checkpoint, and only if it was trained with ent_coef='auto'. "
+            "SAC.load() restores the checkpoint's already-converged (and still shrinking, its "
+            "Adam optimizer state carries over too) entropy coefficient as-is, so a resumed run "
+            "inherits ever-less exploration noise across successive resumes instead of getting "
+            "a real chance to explore into a new reward shape. Pass --ent_coef_start to reset "
+            "log_ent_coef to log(this value) and give it a fresh Adam optimizer for this run."
+        ),
+    )
     parser.add_argument("--no_vecnormalize", action="store_true", default=False)
     parser.add_argument("--keep_all_info", action="store_true", default=False, help="Slower wrapper but keeps extra info.")
     parser.add_argument("--video", action="store_true", default=False)
@@ -296,6 +309,26 @@ def main():
             # of each train() call, so re-pointing it here is enough -- no need to touch the
             # actor/critic/ent_coef optimizers' param_groups directly.
             model._setup_lr_schedule()
+
+        if args.ent_coef_start is not None:
+            if model.log_ent_coef is None:
+                print(
+                    "--ent_coef_start given but this checkpoint was trained with a fixed "
+                    "ent_coef (not 'auto') -- there is no log_ent_coef to reset, ignoring."
+                )
+            else:
+                import math
+                import torch
+
+                with torch.no_grad():
+                    model.log_ent_coef.fill_(math.log(float(args.ent_coef_start)))
+                # The restored ent_coef_optimizer's Adam momentum was actively driving
+                # log_ent_coef DOWN across every previous resume (confirmed: 0.0088 -> 0.0034
+                # -> 0.0027 over three successive runs off the same lineage) -- a fresh
+                # optimizer drops that inherited downward pressure so this run gets an honest
+                # read on whether more exploration actually helps find grasp/lift.
+                ent_lr = float(args.lr_start) if args.lr_start is not None else model.lr_schedule(1)
+                model.ent_coef_optimizer = torch.optim.Adam([model.log_ent_coef], lr=ent_lr)
     else:
         model = SAC(
             env=sb3_env,

@@ -91,8 +91,9 @@ class TerminationsCfg:
 # Reward Weights
 WEIGHT_REACH_XY = 12.0
 WEIGHT_REACH_Z = 9.5
-WEIGHT_LIFT = 15.0
-WEIGHT_GRASP = 10.0
+WEIGHT_LIFT = 20.0
+WEIGHT_GRASP = 15.0
+WEIGHT_GRIP_READY = 3.0
 WEIGHT_NEXT = 1.0
 
 @configclass
@@ -113,13 +114,19 @@ class RewardsCfg:
     object_lifted = RewTerm(
         func=mdp.reward_object_lifted,
         weight=WEIGHT_LIFT,
-        params=dict(target_height=0.15, tolerance=0.0001, weight=WEIGHT_LIFT),
+        params=dict(target_height=0.15, tolerance=0.001, weight=WEIGHT_LIFT),
     )
 
     grasp_contact = RewTerm(
         func=mdp.reward_grasp_contact,
         weight=WEIGHT_GRASP,
-        params=dict(success_xy=0.2, success_z=0.2, force_cap=20.0, weight=WEIGHT_GRASP),
+        params=dict(success_xy=0.05, success_z=0.03, force_cap=20.0, weight=WEIGHT_GRASP),
+    )
+
+    grip_readiness = RewTerm(
+        func=mdp.reward_grip_readiness,
+        weight=WEIGHT_GRIP_READY,
+        params=dict(success_xy=0.1, success_z=0.1, weight=WEIGHT_GRIP_READY),
     )
 
     next_signal = RewTerm(

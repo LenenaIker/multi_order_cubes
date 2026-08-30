@@ -105,14 +105,14 @@ class RewardsCfg:
 
     object_lifted = RewTerm(
         func=mdp.reward_object_lifted,
-        weight=5.0,
+        weight=7.0,
         params=dict(target_height=0.10, tolerance=0.005),
     )
 
     grasp_contact = RewTerm(
         func=mdp.reward_grasp_contact,
-        weight=5.0,
-        params=dict(success_xy=0.05, success_z=0.03, force_cap=20.0),
+        weight=9.0,
+        params=dict(success_xy=0.1, success_z=0.15, force_cap=20.0),
     )
 
     next_signal = RewTerm(

@@ -213,6 +213,31 @@ def get_finger_contact_force_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
     return result
 
 
+def get_finger_contact_force_vec_w(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Per-finger force *vector* at each finger's own peak-magnitude timestep within the
+    decimation window (same "peak, not raw single-step" philosophy as
+    get_finger_contact_force_w above, but keeping direction instead of discarding it via
+    norm). Needed to tell a real cube pinch (opposing force on the two fingers) apart from
+    both fingers pressing into the table (same-direction force) -- see
+    reward_grasp_contact's pinch_cos_threshold gate in mdp/rewards.py.
+    """
+    _invalidate_cache_if_needed(env)
+    key = "finger_contact_force_vec_w"
+    if key in env._moc_cache:
+        return env._moc_cache[key]
+
+    vecs = []
+    for sensor_name in ("left_finger_contact", "right_finger_contact"):
+        history = env.scene[sensor_name].data.net_forces_w_history[:, :, 0, :]  # (N, T, 3)
+        peak_idx = torch.linalg.norm(history, dim=-1).argmax(dim=1)  # (N,)
+        vec = history[torch.arange(history.shape[0], device=env.device), peak_idx, :]
+        vecs.append(vec)
+
+    result = torch.stack(vecs, dim=1)  # (N, 2, 3): [left, right]
+    env._moc_cache[key] = result
+    return result
+
+
 def invalidate_moc_cache(env: "ManagerBasedRLEnv") -> None:
     _ensure_cache(env)
     env._moc_cache.clear()

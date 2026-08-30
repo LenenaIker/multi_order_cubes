@@ -88,36 +88,43 @@ class TerminationsCfg:
     )
 
 
+# Reward Weights
+WEIGHT_REACH_XY = 12.0
+WEIGHT_REACH_Z = 9.5
+WEIGHT_LIFT = 15.0
+WEIGHT_GRASP = 10.0
+WEIGHT_NEXT = 1.0
+
 @configclass
 class RewardsCfg:
     reach_xy_abs = RewTerm(
         func=mdp.reward_reach_xy_rational,
-        weight=12.0,
-        params=dict(k_xy=0.12, p=1.0),
+        weight=WEIGHT_REACH_XY,
+        params=dict(k_xy=0.12, p=1.0, weight=WEIGHT_REACH_XY),
     )
 
     reach_z = RewTerm(
         func=mdp.reward_reach_z_gated,
-        weight=9.5,
-        params=dict(k_z=0.06, p=1.0, gate_dxy=0.18, gate_band=0.05, flat_margin=0.03),
+        weight=WEIGHT_REACH_Z,
+        params=dict(k_z=0.06, p=1.0, gate_dxy=0.18, gate_band=0.05, flat_margin=0.03, weight=WEIGHT_REACH_Z),
     )
 
 
     object_lifted = RewTerm(
         func=mdp.reward_object_lifted,
-        weight=7.0,
-        params=dict(target_height=0.10, tolerance=0.005),
+        weight=WEIGHT_LIFT,
+        params=dict(target_height=0.15, tolerance=0.0001, weight=WEIGHT_LIFT),
     )
 
     grasp_contact = RewTerm(
         func=mdp.reward_grasp_contact,
-        weight=9.0,
-        params=dict(success_xy=0.1, success_z=0.15, force_cap=20.0),
+        weight=WEIGHT_GRASP,
+        params=dict(success_xy=0.2, success_z=0.2, force_cap=20.0, weight=WEIGHT_GRASP),
     )
 
     next_signal = RewTerm(
         func=mdp.reward_next_signal,
-        weight=1.0,
+        weight=WEIGHT_NEXT,
         params=dict(
             next_threshold=_NEXT_THRESHOLD,
             cooldown_steps=_NEXT_COOLDOWN_STEPS,
@@ -125,6 +132,7 @@ class RewardsCfg:
             success_z=0.03,
             bonus=5.0,
             penalty=-0.03,
+            weight=WEIGHT_NEXT,
         ),
     )
 

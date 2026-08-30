@@ -169,6 +169,26 @@ smoothly all the way to full closure with torque staying near its steady-state d
 being correct rather than a missed detection. If the gap plateaus before full closure while
 torque climbs, that would mean real resistance exists despite net_forces_w reading 0 -- a
 genuine sensor bug, not an expected self-collision-off outcome.
+
+Step 13 (this run): new investigation into the 20M-run reward-hacking finding (policy holds a
+fake grasp by pressing both fingers against the table in perfect pre-grasp position, since
+`get_finger_contact_force_w` in mdp/step_cache.py collapses `net_forces_w` to a magnitude via
+`torch.linalg.norm(...)`, discarding direction -- a real cube pinch and a table press are
+indistinguishable to a magnitude-only reading). Two candidate fixes were on the table:
+filtering the sensor to cube prims only (`filter_prim_paths_expr` / `force_matrix_w`), and
+using force *direction* instead of magnitude. The filter path is already a dead end per Step
+6-8 above: `force_matrix_w` read exactly 0.0000 even while visibly gripping a cube with both
+fingers, so it can't be trusted as a per-object channel. This run drops that dead branch
+entirely and reverts the Step 11 "park every cube away" override (that was specifically for
+the self-collision test, and blocks the workspace here), so a real cube sits reachable on a
+slot after `env.reset()` like a normal episode. It then tracks the raw `net_forces_w` *vector*
+(not just its norm) per finger, window-averaged the same way Step 9 introduced for magnitude,
+plus the cosine similarity between the left and right average vectors. Hypothesis: pressing
+both fingers against the table pushes both fingers in roughly the same direction (up, away
+from the table -- cosine near +1), while pinching a cube between the fingers pushes them apart
+from each other along the pinch axis (opposing -- cosine near -1). If that holds, the fix
+needs zero changes to `ContactSensorCfg` in the real training config -- only `step_cache.py`'s
+`get_finger_contact_force_w` would need to read direction instead of discarding it.
 """
 
 import argparse
@@ -257,16 +277,16 @@ def main():
         cube_cfg = getattr(env_cfg.scene, cube_key)
         cube_cfg.spawn.rigid_props.sleep_threshold = 0.0
 
-    cube_filter_paths = [f"{{ENV_REGEX_NS}}/{key}" for key in mdp.CUBE_KEYS_9]
-
+    # Step 13: no filter_prim_paths_expr -- matches the real training config
+    # (config/ur10_gripper/moc_ur10_env_cfg.py) exactly, since force_matrix_w is a
+    # confirmed dead end (Step 6-8) and we're testing a direction-based signal instead,
+    # which only needs the same unfiltered net_forces_w already used in production.
     env_cfg.scene.left_finger_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/ee_link/left_inner_finger",
-        filter_prim_paths_expr=cube_filter_paths,
         force_threshold=1.0,
     )
     env_cfg.scene.right_finger_contact = ContactSensorCfg(
         prim_path="{ENV_REGEX_NS}/Robot/ee_link/right_inner_finger",
-        filter_prim_paths_expr=cube_filter_paths,
         force_threshold=1.0,
     )
 
@@ -287,20 +307,17 @@ def main():
 
     env.reset()
 
-    # Step 11: force every cube far away from the robot so the gripper's workspace is
-    # guaranteed empty -- same "parked" offset randomize_cubes_on_slots already uses for
-    # inactive cubes (env_origin + [5.0, y_off, 0.20]), just applied to all 9 at once.
-    env_origin = env.scene.env_origins[0]
-    identity_quat = torch.tensor([1.0, 0.0, 0.0, 0.0])
-    zero_vel = torch.zeros((1, 6))
-    for i, cube_key in enumerate(mdp.CUBE_KEYS_9):
-        cube = env.scene[cube_key]
-        y_off = (float(i) - 4.0) * 0.25
-        parked_pos = env_origin + torch.tensor([5.0, y_off, 0.20])
-        parked_pose = torch.cat([parked_pos, identity_quat]).unsqueeze(0)
-        cube.write_root_pose_to_sim(parked_pose)
-        cube.write_root_velocity_to_sim(zero_vel)
-    print("=== All 9 cubes parked away from the robot -- gripper workspace is empty. ===")
+    # Step 13: unlike Step 11 (self-collision test, needed an empty workspace), this test
+    # needs a real cube in reach -- env.reset() already ran moc_reset_on_reset, which places
+    # 3 of the 9 cubes onto real slot positions via randomize_cubes_on_slots (the other 6 get
+    # parked env_origin+[5.0, y_off, 0.20], which is NOT distinguishable from a real slot by z
+    # alone). Read the active-cube bookkeeping that event itself sets, and report where the
+    # active cubes landed instead of re-parking everything.
+    active_indices = env.active_cube_indices[0].tolist()
+    for active_idx in active_indices:
+        cube_key = mdp.CUBE_KEYS_9[active_idx]
+        pos = env.scene[cube_key].data.root_pos_w[0]
+        print(f"=== reachable cube: {cube_key} at world pos {pos.tolist()} ===")
 
     from isaacsim.core.utils.stage import get_current_stage
 
@@ -309,12 +326,15 @@ def main():
     dump_prim_tree(stage, robot_path)
 
     print(
-        "=== Dump complete. Entering active physics loop -- no cube is reachable. "
-        "Close the gripper fully (finger_joint slider, Physics Inspector) WITHOUT touching "
-        "anything else. Watch net_avg/net_peak (should stay 0.0000 if self-collision is "
-        "really off) AND gap/torque: gap should shrink smoothly toward 0 as closed_frac "
-        "goes to 1.0 with torque staying flat (frictionless pass-through); if gap instead "
-        "plateaus above 0 while torque climbs, that's real unreported resistance. ==="
+        "=== Dump complete. Entering active physics loop. Using the Physics Inspector's "
+        "joint sliders, try two separate things and watch the printed vectors: "
+        "(1) drive the arm down and touch/press ONE OR BOTH fingers flat against the table "
+        "(gripper can stay open or closed, doesn't matter), then "
+        "(2) position the gripper over the reachable cube printed above and close the fingers "
+        "to actually pinch/squeeze it. Watch left_vec/right_vec (avg force vector over the last "
+        "~1s window) and cos_sim (angle between them): table-press is expected to push both "
+        "fingers roughly the same direction (cos_sim near +1), a real cube pinch is expected "
+        "to push them apart from each other (cos_sim near -1). ==="
     )
 
     physics_dt = env.cfg.sim.dt
@@ -330,13 +350,12 @@ def main():
 
     sensor_names = ["left_finger_contact", "right_finger_contact"]
     running_max_net = {name: 0.0 for name in sensor_names}
-    running_max_cube = {name: 0.0 for name in sensor_names}
-    # window accumulators: reset every print interval, so "avg"/"peak" reflect the last
-    # ~1 sim-second instead of one noisy single-step sample (see Step 9 in the module docstring)
-    window_sum_net = {name: 0.0 for name in sensor_names}
+    # window accumulators: reset every print interval, so "avg" reflects the last ~1
+    # sim-second instead of one noisy single-step sample (see Step 9 in the module docstring).
+    # Step 13: accumulate the full force *vector*, not just its magnitude, so direction
+    # survives the windowed average instead of being discarded like step_cache.py does today.
+    window_vec_sum = {name: torch.zeros(3) for name in sensor_names}
     window_peak_net = {name: 0.0 for name in sensor_names}
-    window_sum_cube = {name: 0.0 for name in sensor_names}
-    window_peak_cube = {name: 0.0 for name in sensor_names}
     window_steps = 0
     step_count = 0
 
@@ -346,18 +365,14 @@ def main():
 
         for sensor_name in sensor_names:
             data = env.scene[sensor_name].data
+            if data.net_forces_w is None:
+                continue
 
-            # any contact at all on this finger body (table, other links, cubes, ...)
-            net_mag = torch.linalg.norm(data.net_forces_w, dim=-1).max().item() if data.net_forces_w is not None else 0.0
-            window_sum_net[sensor_name] += net_mag
+            vec = data.net_forces_w[0, 0, :]  # (num_envs, num_bodies, 3) -> this env/body
+            net_mag = torch.linalg.norm(vec).item()
+            window_vec_sum[sensor_name] += vec
             window_peak_net[sensor_name] = max(window_peak_net[sensor_name], net_mag)
             running_max_net[sensor_name] = max(running_max_net[sensor_name], net_mag)
-
-            # contact specifically against one of the 9 cube prims (filter_prim_paths_expr)
-            cube_mag = torch.linalg.norm(data.force_matrix_w, dim=-1).max().item() if data.force_matrix_w is not None else 0.0
-            window_sum_cube[sensor_name] += cube_mag
-            window_peak_cube[sensor_name] = max(window_peak_cube[sensor_name], cube_mag)
-            running_max_cube[sensor_name] = max(running_max_cube[sensor_name], cube_mag)
 
         window_steps += 1
 
@@ -370,21 +385,26 @@ def main():
             ).item()
             finger_torque = robot.data.applied_torque[0, finger_joint_id].item()
 
+            left_avg = window_vec_sum["left_finger_contact"] / max(window_steps, 1)
+            right_avg = window_vec_sum["right_finger_contact"] / max(window_steps, 1)
+            left_norm = torch.linalg.norm(left_avg).item()
+            right_norm = torch.linalg.norm(right_avg).item()
+            if left_norm > 1e-6 and right_norm > 1e-6:
+                cos_sim = (torch.dot(left_avg, right_avg) / (left_norm * right_norm)).item()
+                cos_sim_str = f"{cos_sim:+.3f}"
+            else:
+                cos_sim_str = "n/a (near-zero force)"
+
             print(
-                f"[{step_count:06d}] gap={finger_gap:.4f} closed_frac={closed_frac:.3f} torque={finger_torque:+.4f}  |  "
-                f"left: net_avg={window_sum_net['left_finger_contact'] / window_steps:.4f} "
-                f"net_peak={window_peak_net['left_finger_contact']:.4f} net_allmax={running_max_net['left_finger_contact']:.4f} "
-                f"cube_avg={window_sum_cube['left_finger_contact'] / window_steps:.4f} "
-                f"cube_peak={window_peak_cube['left_finger_contact']:.4f} cube_allmax={running_max_cube['left_finger_contact']:.4f}  |  "
-                f"right: net_avg={window_sum_net['right_finger_contact'] / window_steps:.4f} "
-                f"net_peak={window_peak_net['right_finger_contact']:.4f} net_allmax={running_max_net['right_finger_contact']:.4f} "
-                f"cube_avg={window_sum_cube['right_finger_contact'] / window_steps:.4f} "
-                f"cube_peak={window_peak_cube['right_finger_contact']:.4f} cube_allmax={running_max_cube['right_finger_contact']:.4f}"
+                f"[{step_count:06d}] gap={finger_gap:.4f} closed_frac={closed_frac:.3f} torque={finger_torque:+.4f}\n"
+                f"    left_vec=({left_avg[0]:+.3f},{left_avg[1]:+.3f},{left_avg[2]:+.3f}) "
+                f"|left|={left_norm:.4f} peak={window_peak_net['left_finger_contact']:.4f} allmax={running_max_net['left_finger_contact']:.4f}\n"
+                f"    right_vec=({right_avg[0]:+.3f},{right_avg[1]:+.3f},{right_avg[2]:+.3f}) "
+                f"|right|={right_norm:.4f} peak={window_peak_net['right_finger_contact']:.4f} allmax={running_max_net['right_finger_contact']:.4f}\n"
+                f"    cos_sim(left,right)={cos_sim_str}"
             )
-            window_sum_net = {name: 0.0 for name in sensor_names}
+            window_vec_sum = {name: torch.zeros(3) for name in sensor_names}
             window_peak_net = {name: 0.0 for name in sensor_names}
-            window_sum_cube = {name: 0.0 for name in sensor_names}
-            window_peak_cube = {name: 0.0 for name in sensor_names}
             window_steps = 0
 
         step_count += 1

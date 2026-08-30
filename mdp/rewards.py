@@ -6,7 +6,14 @@ import torch
 import isaaclab.utils.math as math_utils
 
 from .events import next_trigger_mask
-from .step_cache import get_active_cube_pos_w, get_finger_contact_force_w, get_slots_w, get_tcp_pos_w, get_tcp_quat_w
+from .step_cache import (
+    get_active_cube_pos_w,
+    get_finger_contact_force_vec_w,
+    get_finger_contact_force_w,
+    get_slots_w,
+    get_tcp_pos_w,
+    get_tcp_quat_w,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -32,10 +39,44 @@ def _safe_norm(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     return torch.sqrt(torch.sum(x * x, dim=-1) + eps)
 
 
+def _log_weighted_reward(env: "ManagerBasedRLEnv", name: str, raw: torch.Tensor, weight: float) -> None:
+    """Logs a reward term's actual contribution to the total reward SAC receives.
+
+    `RewardManager.compute()` (isaaclab.managers.reward_manager) multiplies each term's raw
+    return by `weight` and `env.step_dt` when summing the episode total, so that's what's
+    logged here too, under a `rewards/` prefix `IsaacInfoTensorboardCallback` forwards to its
+    own TensorBoard tag group. Lets us see which term the policy is actually maximizing in
+    absolute terms, not just each function's raw (pre-weight) output shape.
+    """
+    if not hasattr(env, "extras") or env.extras is None:
+        env.extras = {}
+    env.extras[f"rewards/{name}"] = raw.detach() * float(weight) * env.step_dt
+
+
+def _finger_cos_sim(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    """Cosine similarity between the left/right finger contact-force vectors.
+
+    Confirmed live via ContactSensorInspector.py (2026-08-30): a real cube pinch reads
+    ~-0.97 to -1.00 (fingers pushed apart from each other), both fingers pressing flat
+    against the table reads ~+1.00 (pushed the same direction). Used by
+    reward_grasp_contact to reject the table-press false positive.
+    """
+    vecs = get_finger_contact_force_vec_w(env)
+    left, right = vecs[:, 0, :], vecs[:, 1, :]
+    left_n = _safe_norm(left)
+    right_n = _safe_norm(right)
+    cos = (left * right).sum(dim=-1) / (left_n * right_n).clamp(min=1e-6)
+    # near-zero force on either finger means there's no real contact signal to read a
+    # direction from -- don't let a near-zero-norm division artifact pass as a valid pinch.
+    valid = (left_n > 1e-3) & (right_n > 1e-3)
+    return torch.where(valid, cos, torch.zeros_like(cos))
+
+
 def reward_reach_xy_rational(
     env: "ManagerBasedRLEnv",
     k_xy: float = 0.10,
     p: float = 1.0,
+    weight: float = 12.0,
 ) -> torch.Tensor:
     tip = get_tcp_pos_w(env, ee_frame_name="ee_frame")
     cube = _target_cube_pos_w(env)
@@ -49,6 +90,7 @@ def reward_reach_xy_rational(
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
     env.extras["moc/reach_dist_xy"] = dist_xy
+    _log_weighted_reward(env, "reach_xy", reward, weight)
 
     return reward
 
@@ -90,6 +132,7 @@ def reward_reach_z_gated(
     gate_dxy: float = 0.18,
     gate_band: float = 0.05,
     flat_margin: float = 0.03,
+    weight: float = 9.5,
 ) -> torch.Tensor:
     """Rational falloff (same family as `reward_reach_xy_rational`), not a Gaussian.
 
@@ -130,7 +173,10 @@ def reward_reach_z_gated(
     env.extras["moc/reach_gate_xy"] = gate
     env.extras["moc/reach_abs_dz"] = torch.abs(dz)
 
-    return gate * z_reward
+    reward = gate * z_reward
+    _log_weighted_reward(env, "reach_z", reward, weight)
+
+    return reward
 
 
 def penalty_table_proximity(
@@ -212,6 +258,7 @@ def reward_next_signal(
     success_z: float = 0.03,
     bonus: float = 5.0,
     penalty: float = -0.03,
+    weight: float = 1.0,
 ) -> torch.Tensor:
     """Rewards pressing NEXT once the reach target is actually reached, penalizes early presses.
 
@@ -252,6 +299,7 @@ def reward_next_signal(
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
     env.extras["moc/next_reward"] = reward
+    _log_weighted_reward(env, "next_signal", reward, weight)
 
     return reward
 
@@ -350,6 +398,8 @@ def reward_grasp_contact(
     success_xy: float = 0.05,
     success_z: float = 0.03,
     force_cap: float = 20.0,
+    pinch_cos_threshold: float = -0.3,
+    weight: float = 10.0,
 ) -> torch.Tensor:
     """Dense reward for squeezing the gripper closed on the target cube specifically.
 
@@ -365,6 +415,14 @@ def reward_grasp_contact(
     exactly zero force on both sensors (confirmed live via ContactSensorInspector.py,
     2026-08-29), so nonzero force on both fingers can only come from a real object between
     them.
+
+    Also gated on `_finger_cos_sim` being below `pinch_cos_threshold`: the contact sensors
+    are unfiltered (report contact against anything, table included), and magnitude alone
+    can't tell a real pinch apart from both fingers pressing flat against the table -- a
+    20M-step run exploited exactly that, holding a stable fake grasp against the table
+    instead of ever attempting a lift. `pinch_cos_threshold=-0.3` sits with a generous
+    margin below the table-press value observed live (~+1.0) and above the real-pinch range
+    (~-0.97 to -1.00), see project_contact_sensor_investigation.md memory.
     """
     dist_xy = env.extras.get("moc/reach_dist_xy") if hasattr(env, "extras") and env.extras else None
     abs_dz = env.extras.get("moc/reach_abs_dz") if hasattr(env, "extras") and env.extras else None
@@ -376,11 +434,19 @@ def reward_grasp_contact(
 
     force = get_finger_contact_force_w(env)
     grip_force = torch.amin(force, dim=1)
-    reward = (grip_force.clamp(min=0.0, max=float(force_cap)) / float(force_cap)) * in_position.to(torch.float32)
+    cos_sim = _finger_cos_sim(env)
+    pinch_gate = cos_sim < float(pinch_cos_threshold)
+    reward = (
+        (grip_force.clamp(min=0.0, max=float(force_cap)) / float(force_cap))
+        * in_position.to(torch.float32)
+        * pinch_gate.to(torch.float32)
+    )
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
     env.extras["moc/grasp_force"] = grip_force
+    env.extras["moc/grasp_cos_sim"] = cos_sim
+    _log_weighted_reward(env, "grasp_contact", reward, weight)
 
     return reward
 
@@ -389,6 +455,7 @@ def reward_object_lifted(
     env: "ManagerBasedRLEnv",
     target_height: float = 0.10,
     tolerance: float = 0.001,
+    weight: float = 15.0,
 ) -> torch.Tensor:
     """Dense reward for lifting the target cube above its resting height.
 
@@ -415,5 +482,6 @@ def reward_object_lifted(
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
     env.extras["moc/lift_delta_z"] = target_delta_z
+    _log_weighted_reward(env, "object_lifted", reward, weight)
 
     return reward

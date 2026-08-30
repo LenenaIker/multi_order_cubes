@@ -19,6 +19,24 @@ def parse_args():
     parser.add_argument("--logdir", type=str, default="logs/sb3/multi_order_cubes_sac")
     parser.add_argument("--run_name", type=str, default=None)
     parser.add_argument("--checkpoint", type=str, default=None, help="Path to a .zip SB3 checkpoint to resume from.")
+    parser.add_argument(
+        "--lr_start",
+        type=float,
+        default=None,
+        help=(
+            "Only used with --checkpoint. SAC.load() restores the schedule saved in the "
+            "checkpoint as-is, ignoring --cfg's learning_rate, and reset_num_timesteps=True "
+            "on model.learn() restarts that schedule's progress from 1.0 -- so a resumed run "
+            "would otherwise jump back to the ORIGINAL run's peak LR. Pass --lr_start (and "
+            "optionally --lr_end) to override with a fresh linear schedule for this run."
+        ),
+    )
+    parser.add_argument(
+        "--lr_end",
+        type=float,
+        default=0.0,
+        help="Only used with --checkpoint and --lr_start. Value the linear schedule decays to.",
+    )
     parser.add_argument("--no_vecnormalize", action="store_true", default=False)
     parser.add_argument("--keep_all_info", action="store_true", default=False, help="Slower wrapper but keeps extra info.")
     parser.add_argument("--video", action="store_true", default=False)
@@ -50,9 +68,12 @@ class DumpLoggerCallback(BaseCallback):
 
 class IsaacInfoTensorboardCallback(BaseCallback):
     """
-    Lee infos[] y vuelca a TensorBoard cualquier key que empiece por 'moc/'.
+    Lee infos[] y vuelca a TensorBoard cualquier key que empiece por 'moc/' o 'rewards/'.
     Recomendado entrenar con --keep_all_info para que Sb3VecEnvWrapper no filtre extras.
     """
+
+    LOGGED_PREFIXES = ("moc/", "rewards/")
+
     def __init__(self, log_every: int = 100):
         super().__init__()
         self.log_every = int(log_every)
@@ -65,14 +86,14 @@ class IsaacInfoTensorboardCallback(BaseCallback):
         if not infos:
             return True
 
-        
-        
+
+
         agg = {}
         for info in infos:
             if not isinstance(info, dict):
                 continue
             for k, v in info.items():
-                if not isinstance(k, str) or not k.startswith("moc/"):
+                if not isinstance(k, str) or not k.startswith(self.LOGGED_PREFIXES):
                     continue
                 agg.setdefault(k, []).append(v)
 
@@ -260,6 +281,21 @@ def main():
             device="cuda" if "cuda" in str(args.device).lower() else "cpu",
             print_system_info=True,
         )
+
+        if args.lr_start is not None:
+            # SAC.load() restored whatever schedule was pickled in the checkpoint, and
+            # model.learn() below resets num_timesteps to 0 (reset_num_timesteps=True is
+            # SB3's default and we don't override it), which restarts that schedule's
+            # progress_remaining from 1.0. Left alone, this makes a resumed run jump back to
+            # the ORIGINAL run's peak learning_rate instead of continuing its decay. Build a
+            # fresh linear schedule for *this* run instead.
+            from stable_baselines3.common.utils import get_linear_fn
+
+            model.learning_rate = get_linear_fn(float(args.lr_start), float(args.lr_end), end_fraction=1.0)
+            # SB3 re-derives every optimizer's actual lr from model.lr_schedule at the start
+            # of each train() call, so re-pointing it here is enough -- no need to touch the
+            # actor/critic/ent_coef optimizers' param_groups directly.
+            model._setup_lr_schedule()
     else:
         model = SAC(
             env=sb3_env,

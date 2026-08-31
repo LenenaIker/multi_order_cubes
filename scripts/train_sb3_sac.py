@@ -1,6 +1,7 @@
 import argparse
 from pathlib import Path
 import datetime
+import re
 import yaml
 import copy
 
@@ -50,6 +51,42 @@ def parse_args():
             "log_ent_coef to log(this value) and give it a fresh Adam optimizer for this run."
         ),
     )
+    parser.add_argument(
+        "--learning_starts",
+        type=int,
+        default=None,
+        help=(
+            "Only used with --checkpoint. SAC.load() restores the checkpoint's own "
+            "learning_starts (default 250_000, sized for a random-init policy), and since "
+            "reset_num_timesteps=True resets num_timesteps to 0 on resume, a resumed run "
+            "re-triggers that same random-action warmup window before any real training "
+            "happens -- 250k steps of literal noise thrown at an already-competent policy, "
+            "discarding it instead of using it. This is the wrong regime for a warm resume: "
+            "the published fix (WSRL, 'Efficient Online RL Fine-Tuning Need Not Retain "
+            "Offline Data', ICLR 2025) is to seed the resumed buffer with rollouts FROM the "
+            "already-trained policy, not random actions, which is exactly what a small/zero "
+            "learning_starts gets you here since SAC only samples randomly while "
+            "num_timesteps < learning_starts. Pass e.g. --learning_starts 0 (or a few "
+            "thousand, if you want a brief buffer-refill margin) on a resumed run."
+        ),
+    )
+    parser.add_argument(
+        "--vecnormalize",
+        type=str,
+        default=None,
+        help=(
+            "Only used with --checkpoint. Path to a VecNormalize .pkl to restore obs "
+            "normalization stats from, matching the checkpoint's own training run. If "
+            "omitted, inferred from --checkpoint by this script's own save-file naming "
+            "convention (final_sac.zip -> vecnormalize.pkl, best_sac.zip -> "
+            "best_vecnormalize.pkl, checkpoints/<prefix>_<N>_steps.zip -> "
+            "checkpoints/<prefix>_vecnormalize_<N>_steps.pkl, sibling to the checkpoint). "
+            "Without a match, VecNormalize starts with cold (empty) running statistics "
+            "even though the loaded policy was trained against the old run's converged "
+            "statistics -- a real distribution-shift tax on top of the replay buffer's own "
+            "cold start (see --checkpoint's own docstring caveat)."
+        ),
+    )
     parser.add_argument("--no_vecnormalize", action="store_true", default=False)
     parser.add_argument("--keep_all_info", action="store_true", default=False, help="Slower wrapper but keeps extra info.")
     parser.add_argument("--video", action="store_true", default=False)
@@ -59,6 +96,29 @@ def parse_args():
     
     AppLauncher.add_app_launcher_args(parser)
     return parser.parse_args()
+
+
+def infer_vecnormalize_path(checkpoint_path: Path) -> Path | None:
+    """Infers the sibling VecNormalize .pkl saved alongside a checkpoint by this script's
+    own naming convention (see CheckpointCallback's save_vecnormalize / SaveBestModelOnEpRewCallback
+    / the final sb3_env.save() call below), so a --checkpoint resume can restore obs
+    normalization stats matching the checkpoint instead of always starting VecNormalize cold.
+    Returns None if the checkpoint filename doesn't match any known pattern, or the inferred
+    file doesn't actually exist -- callers should treat both the same (fall back / warn).
+    """
+    name = checkpoint_path.name
+    parent = checkpoint_path.parent
+    if name == "final_sac.zip":
+        candidate = parent / "vecnormalize.pkl"
+    elif name == "best_sac.zip":
+        candidate = parent / "best_vecnormalize.pkl"
+    else:
+        m = re.match(r"^(.+)_(\d+)_steps\.zip$", name)
+        if not m:
+            return None
+        prefix, steps = m.group(1), m.group(2)
+        candidate = parent / f"{prefix}_vecnormalize_{steps}_steps.pkl"
+    return candidate if candidate.is_file() else None
 
 
 def load_yaml(path: str) -> dict:
@@ -81,11 +141,23 @@ class DumpLoggerCallback(BaseCallback):
 
 class IsaacInfoTensorboardCallback(BaseCallback):
     """
-    Lee infos[] y vuelca a TensorBoard cualquier key que empiece por 'moc/' o 'rewards/'.
+    Lee infos[] y vuelca a TensorBoard cualquier key cuyo prefijo esté en LOGGED_PREFIXES.
+
     Recomendado entrenar con --keep_all_info para que Sb3VecEnvWrapper no filtre extras.
+
+    Categories (cubes/, position/, grip/, tasks/) are each their own top-level tag prefix,
+    deliberately not nested under a shared 'moc/' umbrella: TensorBoard's scalar dashboard
+    only groups cards by the substring before the FIRST '/' in a tag name, it doesn't
+    recurse into further slashes -- confirmed empirically (15 moc/* tags all landing flat
+    under one 'moc' group, overflowing its 12-card page limit). Making the category itself
+    the first segment gives each one its own top-level, separately-paginated group instead
+    of one giant flat bucket. Trade-off: these are generic English words with no 'moc'
+    marker, so a future unrelated env.extras key starting with the same word would also get
+    swept into TensorBoard by this filter -- acceptable here since env.extras is only ever
+    populated by this project's own mdp/*.py reward and termination functions.
     """
 
-    LOGGED_PREFIXES = ("moc/", "rewards/")
+    LOGGED_PREFIXES = ("cubes/", "position/", "grip/", "tasks/", "rewards/")
 
     def __init__(self, log_every: int = 100):
         super().__init__()
@@ -242,7 +314,26 @@ def main():
 
     
     if not args.no_vecnormalize:
-        sb3_env = VecNormalize(sb3_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
+        vecnorm_path = None
+        if args.checkpoint is not None:
+            vecnorm_path = Path(args.vecnormalize) if args.vecnormalize else infer_vecnormalize_path(Path(args.checkpoint))
+            if vecnorm_path is not None and not vecnorm_path.is_file():
+                print(f"[WARN] --vecnormalize path not found: {vecnorm_path} -- starting VecNormalize cold.")
+                vecnorm_path = None
+            elif vecnorm_path is None:
+                print(
+                    "[WARN] Resuming from --checkpoint but no matching VecNormalize .pkl was found "
+                    "(pass --vecnormalize explicitly if it exists under a different name) -- "
+                    "starting VecNormalize cold, mismatched against the loaded policy's training scale."
+                )
+
+        if vecnorm_path is not None:
+            sb3_env = VecNormalize.load(str(vecnorm_path), sb3_env)
+            sb3_env.training = True
+            sb3_env.norm_reward = False
+            print(f"[INFO] Restored VecNormalize stats from {vecnorm_path}")
+        else:
+            sb3_env = VecNormalize(sb3_env, norm_obs=True, norm_reward=False, clip_obs=10.0)
 
     
     
@@ -329,6 +420,15 @@ def main():
                 # read on whether more exploration actually helps find grasp/lift.
                 ent_lr = float(args.lr_start) if args.lr_start is not None else model.lr_schedule(1)
                 model.ent_coef_optimizer = torch.optim.Adam([model.log_ent_coef], lr=ent_lr)
+
+        if args.learning_starts is not None:
+            # See --learning_starts' own help text: SAC only samples random actions while
+            # num_timesteps < learning_starts, and reset_num_timesteps=True means a resumed
+            # run starts that count over from 0 again. Left at the checkpoint's original
+            # value (sized for a random-init policy), this throws away an already-competent
+            # actor for that whole window instead of using it to collect on-policy data.
+            model.learning_starts = int(args.learning_starts)
+            print(f"[INFO] Overrode learning_starts to {model.learning_starts} for this resumed run.")
     else:
         model = SAC(
             env=sb3_env,

@@ -89,7 +89,7 @@ def reward_reach_xy_rational(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/pos/dist_xy"] = dist_xy
+    env.extras["position/dist_xy"] = dist_xy
     _log_weighted_reward(env, "reach_xy", reward, weight)
 
     return reward
@@ -120,7 +120,7 @@ def reward_reach_xy_progress(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/pos/delta_xy"] = reward
+    env.extras["position/delta_xy"] = reward
 
     return reward
 
@@ -170,8 +170,8 @@ def reward_reach_z_gated(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/pos/gate_xy"] = gate
-    env.extras["moc/pos/dist_z"] = torch.abs(dz)
+    env.extras["position/gate_xy"] = gate
+    env.extras["position/dist_z"] = torch.abs(dz)
 
     reward = gate * z_reward
     _log_weighted_reward(env, "reach_z", reward, weight)
@@ -215,7 +215,7 @@ def penalty_table_proximity(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/pos/table_dist"] = excess
+    env.extras["position/table_dist"] = excess
 
     return penalty
 
@@ -245,7 +245,7 @@ def penalty_arm_joint_velocity(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/pos/joint_vel"] = penalty
+    env.extras["position/joint_vel"] = penalty
 
     return penalty
 
@@ -275,8 +275,8 @@ def reward_next_signal(
     Also updates `env.moc_stable_success`, which doubles as the "am I in the success zone
     right now" observation consumed by `mdp.observations.stable_success_hint`.
     """
-    dist_xy = env.extras.get("moc/pos/dist_xy") if hasattr(env, "extras") and env.extras else None
-    abs_dz = env.extras.get("moc/pos/dist_z") if hasattr(env, "extras") and env.extras else None
+    dist_xy = env.extras.get("position/dist_xy") if hasattr(env, "extras") and env.extras else None
+    abs_dz = env.extras.get("position/dist_z") if hasattr(env, "extras") and env.extras else None
 
     if dist_xy is None or abs_dz is None:
         success = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
@@ -298,7 +298,7 @@ def reward_next_signal(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/task/next_reward"] = reward
+    env.extras["tasks/next_reward"] = reward
     _log_weighted_reward(env, "next_signal", reward, weight)
 
     return reward
@@ -339,7 +339,7 @@ def penalty_bystander_displacement(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/cubes/bystander_disp"] = bystander_disp.sum(dim=1)
+    env.extras["cubes/bystander_disp"] = bystander_disp.sum(dim=1)
 
     return penalty
 
@@ -355,9 +355,9 @@ def diag_grip_distance(
     Logs where the gripper is actually closing relative to the target cube: masks the
     reach distance/offset by which envs currently have their gripper past
     `closed_threshold` closedness (normalized against the joint's own live position
-    limits, not a hardcoded angle), so `moc/grip/dist_xy` / `moc/grip/offset_x` /
-    `moc/grip/offset_y` reflect only the moments the policy chooses to close, not the whole
-    episode. `moc/grip/closed_frac` (fraction of envs gripping this logged snapshot) is logged
+    limits, not a hardcoded angle), so `grip/dist_xy` / `grip/offset_x` /
+    `grip/offset_y` reflect only the moments the policy chooses to close, not the whole
+    episode. `grip/closed_frac` (fraction of envs gripping this logged snapshot) is logged
     alongside it: when it's near 0, the other four values are near-meaningless (division
     by a clamped denominator when nobody's gripping falls back to 0, which would otherwise
     look like "gripping dead-center" rather than "nobody was gripping").
@@ -384,11 +384,11 @@ def diag_grip_distance(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/grip/closed_frac"] = gripping
-    env.extras["moc/grip/dist_xy"] = ((dist_xy * gripping).sum() / n_gripping).expand(env.num_envs)
-    env.extras["moc/grip/dist_z"] = ((dist_z * gripping).sum() / n_gripping).expand(env.num_envs)
-    env.extras["moc/grip/offset_x"] = ((offset_xy[:, 0] * gripping).sum() / n_gripping).expand(env.num_envs)
-    env.extras["moc/grip/offset_y"] = ((offset_xy[:, 1] * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["grip/closed_frac"] = gripping
+    env.extras["grip/dist_xy"] = ((dist_xy * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["grip/dist_z"] = ((dist_z * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["grip/offset_x"] = ((offset_xy[:, 0] * gripping).sum() / n_gripping).expand(env.num_envs)
+    env.extras["grip/offset_y"] = ((offset_xy[:, 1] * gripping).sum() / n_gripping).expand(env.num_envs)
 
     return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
 
@@ -429,8 +429,8 @@ def reward_grip_readiness(
     run (run_20260830_152133) found a cheap local optimum, so this stays intentionally
     weak and graded by proximity rather than paid flat from anywhere nearby.
     """
-    dist_xy = env.extras.get("moc/pos/dist_xy") if hasattr(env, "extras") and env.extras else None
-    abs_dz = env.extras.get("moc/pos/dist_z") if hasattr(env, "extras") and env.extras else None
+    dist_xy = env.extras.get("position/dist_xy") if hasattr(env, "extras") and env.extras else None
+    abs_dz = env.extras.get("position/dist_z") if hasattr(env, "extras") and env.extras else None
 
     if dist_xy is None or abs_dz is None:
         return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
@@ -485,8 +485,8 @@ def reward_grasp_contact(
     margin below the table-press value observed live (~+1.0) and above the real-pinch range
     (~-0.97 to -1.00), see project_contact_sensor_investigation.md memory.
     """
-    dist_xy = env.extras.get("moc/pos/dist_xy") if hasattr(env, "extras") and env.extras else None
-    abs_dz = env.extras.get("moc/pos/dist_z") if hasattr(env, "extras") and env.extras else None
+    dist_xy = env.extras.get("position/dist_xy") if hasattr(env, "extras") and env.extras else None
+    abs_dz = env.extras.get("position/dist_z") if hasattr(env, "extras") and env.extras else None
 
     if dist_xy is None or abs_dz is None:
         return torch.zeros((env.num_envs,), dtype=torch.float32, device=env.device)
@@ -505,8 +505,8 @@ def reward_grasp_contact(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/grip/force"] = grip_force
-    env.extras["moc/grip/pinch_cos_sim"] = cos_sim
+    env.extras["grip/force"] = grip_force
+    env.extras["grip/pinch_cos_sim"] = cos_sim
     _log_weighted_reward(env, "grasp_contact", reward, weight)
 
     return reward
@@ -542,7 +542,7 @@ def reward_object_lifted(
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/task/lift_height"] = target_delta_z
+    env.extras["tasks/lift_height"] = target_delta_z
     _log_weighted_reward(env, "object_lifted", reward, weight)
 
     return reward

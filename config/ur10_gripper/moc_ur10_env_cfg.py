@@ -140,7 +140,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
                 FrameTransformerCfg.FrameCfg(
                     prim_path="{ENV_REGEX_NS}/Robot/ee_link/robotiq_base_link",
                     name="tcp",
-                    offset=OffsetCfg(pos=(0.0, 0.0, 0.18)),
+                    offset=OffsetCfg(pos=(0.0, 0.0, 0.185)),
                 ),
             ],
         )
@@ -157,7 +157,7 @@ class UR10LongSuctionMultiOrderCubesEnvCfg(MOCEnvCfg):
             ],
             body_name="robotiq_base_link",
             body_offset=DifferentialInverseKinematicsActionCfg.OffsetCfg(
-                pos=(0.0, 0.0, 0.18),
+                pos=(0.0, 0.0, 0.185),
             ),
             controller=DifferentialIKControllerCfg(
                 command_type="pose",

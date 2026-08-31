@@ -42,7 +42,7 @@ def cube_fell_off_table(env, height_threshold: float = -0.05, max_xy_displacemen
         result = fell.any(dim=1)
         if not hasattr(env, "extras") or env.extras is None:
             env.extras = {}
-        env.extras["moc/cube_off_table"] = result
+        env.extras["moc/cubes/off_table"] = result
         return result
 
     xy_disp = torch.linalg.vector_norm(cubes_pos[:, :, :2] - env.moc_cube_home_pos_w[:, :, :2], dim=-1)
@@ -52,6 +52,6 @@ def cube_fell_off_table(env, height_threshold: float = -0.05, max_xy_displacemen
 
     if not hasattr(env, "extras") or env.extras is None:
         env.extras = {}
-    env.extras["moc/cube_off_table"] = result
+    env.extras["moc/cubes/off_table"] = result
 
     return result

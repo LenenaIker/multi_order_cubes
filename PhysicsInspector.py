@@ -118,9 +118,9 @@ def main():
 
 
         # Read extra debug values saved by rewards.py
-        dxy = env.extras.get("moc/reach_dist_xy", None) if hasattr(env, "extras") and env.extras else None
-        gate = env.extras.get("moc/reach_gate_xy", None) if hasattr(env, "extras") and env.extras else None
-        adz = env.extras.get("moc/reach_abs_dz", None) if hasattr(env, "extras") and env.extras else None
+        dxy = env.extras.get("moc/pos/dist_xy", None) if hasattr(env, "extras") and env.extras else None
+        gate = env.extras.get("moc/pos/gate_xy", None) if hasattr(env, "extras") and env.extras else None
+        adz = env.extras.get("moc/pos/dist_z", None) if hasattr(env, "extras") and env.extras else None
 
 
         # Read TCP and target cube positions

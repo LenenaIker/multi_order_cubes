@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import torch
 from isaaclab.sim.schemas import activate_contact_sensors
 
-from .commands import latch_target_cube_from_command, sample_command_from_to, update_slot_success_ema
+from .commands import latch_target_cube_from_command, sample_command_from_to
 from .constants import CUBE_KEYS_9
 from .step_cache import get_active_cube_pos_w, invalidate_moc_cache
 
@@ -182,22 +182,18 @@ def moc_reset_on_reset(env: "ManagerBasedRLEnv", env_ids=None) -> None:
     if hasattr(env, "moc_next_signal") and env.moc_next_signal is not None:
         env.moc_next_signal[settle_env_ids] = 0.0
 
-    # Prioritized slot sampling (2026-09-02, see mdp/commands.py): before handing out a fresh
-    # command, record the outcome of whichever command this env is leaving behind. Most resets
-    # land here via time_out/cube_off_table while the command was never fulfilled (the
-    # consume_next_signal success path already resampled and reset the flag below for anything
-    # that succeeded), so this is effectively the "still stuck" failure signal for that from-slot.
-    # Guarded because command_from_to/moc_command_ever_success don't exist yet on the very first
-    # reset of a fresh env -- there is no prior command to score in that case.
-    if (
-        hasattr(env, "command_from_to") and env.command_from_to is not None
-        and hasattr(env, "moc_command_ever_success") and env.moc_command_ever_success is not None
-    ):
-        prev_from = env.command_from_to.index_select(0, settle_env_ids)[:, 0] - 1
-        valid = prev_from >= 0
-        if valid.any():
-            ever_success = env.moc_command_ever_success.index_select(0, settle_env_ids)
-            update_slot_success_ema(env, prev_from[valid], ever_success[valid])
+    # Prioritized slot sampling (2026-09-02, DISABLED 2026-09-02, see mdp/commands.py): this
+    # block only fed the disabled EMA-weighted sampling above. Left commented out rather than
+    # deleted in case that feature is revisited later.
+    # if (
+    #     hasattr(env, "command_from_to") and env.command_from_to is not None
+    #     and hasattr(env, "moc_command_ever_success") and env.moc_command_ever_success is not None
+    # ):
+    #     prev_from = env.command_from_to.index_select(0, settle_env_ids)[:, 0] - 1
+    #     valid = prev_from >= 0
+    #     if valid.any():
+    #         ever_success = env.moc_command_ever_success.index_select(0, settle_env_ids)
+    #         update_slot_success_ema(env, prev_from[valid], ever_success[valid])
 
     if not hasattr(env, "moc_command_ever_success") or env.moc_command_ever_success is None:
         env.moc_command_ever_success = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
@@ -289,8 +285,10 @@ def consume_next_signal(
         env.moc_next_cooldown[idle_ids] = (env.moc_next_cooldown.index_select(0, idle_ids) - 1).clamp(min=0)
 
     if trigger_ids.numel() > 0:
-        prev_from = env.command_from_to.index_select(0, trigger_ids)[:, 0] - 1
-        update_slot_success_ema(env, prev_from, torch.ones_like(prev_from, dtype=torch.bool))
+        # Prioritized slot sampling (2026-09-02, DISABLED 2026-09-02): only fed the disabled
+        # EMA-weighted sampling in mdp/commands.py, left commented out rather than deleted.
+        # prev_from = env.command_from_to.index_select(0, trigger_ids)[:, 0] - 1
+        # update_slot_success_ema(env, prev_from, torch.ones_like(prev_from, dtype=torch.bool))
 
         sample_command_from_to(env, env_ids=trigger_ids)
         env.moc_next_cooldown[trigger_ids] = int(cooldown_steps)

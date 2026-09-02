@@ -12,3 +12,7 @@ tensorboard/
 .vscode/
 .idea/
 *.iml
+
+CLAUDE.md
+CLAUDE.local.md
+.claude/settings.local.json

@@ -386,6 +386,16 @@ def main():
             print_system_info=True,
         )
 
+        if "gradient_steps" in agent_cfg:
+            # SAC.load() restores gradient_steps as pickled in the checkpoint -- i.e. scaled
+            # for whatever num_envs that checkpoint was ORIGINALLY trained at, not this run's
+            # --num_envs. Left alone, a resume at a different num_envs silently keeps the old
+            # gradient-updates-per-env.step() count, so the ratio of gradient updates to newly
+            # collected transitions drifts away from what the scaling above intends (e.g.
+            # resuming a 1024-env checkpoint at 4096 envs quietly trains at 1/4 the intended
+            # update intensity). Re-apply the freshly computed, num_envs-scaled value here.
+            model.gradient_steps = agent_cfg["gradient_steps"]
+
         if args.lr_start is not None:
             # SAC.load() restored whatever schedule was pickled in the checkpoint, and
             # model.learn() below resets num_timesteps to 0 (reset_num_timesteps=True is

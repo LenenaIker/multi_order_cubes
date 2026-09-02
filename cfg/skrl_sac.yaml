@@ -1,0 +1,28 @@
+# skrl SAC hyperparameters. Own convention (not IsaacLab's Runner/Hydra schema, since MOC's
+# skrl train.py builds SAC by hand -- see scripts/skrl/train.py) but field names below match
+# skrl.agents.torch.sac.SAC_DEFAULT_CONFIG's own keys 1:1 so they can be passed through as-is.
+#
+# Values are ported from cfg/sb3_sac.yaml where a direct equivalent exists. NOT yet ported
+# (Phase C, see the migration plan): the "lin_3.0e-4" linear LR decay (flat LR here for now),
+# and cfg/sb3_sac.yaml's train.py-side gradient_steps scaling by num_envs (see the comment next
+# to that scaling code) -- gradient_steps below is skrl's own default, unscaled.
+
+net_arch: [256, 256, 256]
+
+memory_size: 2000000        # sb3_sac.yaml: buffer_size
+
+gradient_steps: 1
+batch_size: 1024
+
+discount_factor: 0.99       # sb3_sac.yaml: gamma
+polyak: 0.005                # sb3_sac.yaml: tau
+
+actor_learning_rate: 3.0e-4  # sb3_sac.yaml: learning_rate (flat here, was "lin_3.0e-4")
+critic_learning_rate: 3.0e-4
+
+random_timesteps: 250000     # sb3_sac.yaml: learning_starts (random-action window)
+learning_starts: 250000      # sb3_sac.yaml: learning_starts (gradient-update start)
+
+learn_entropy: true           # sb3_sac.yaml: ent_coef "auto"
+entropy_learning_rate: 3.0e-4
+initial_entropy_value: 0.2

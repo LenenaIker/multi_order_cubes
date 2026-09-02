@@ -145,7 +145,18 @@ def gripper_state(
 ) -> torch.Tensor:
     robot: Articulation = env.scene[robot_cfg.name]
     joint_ids, _ = robot.find_joints(getattr(env.cfg, "gripper_joint_names", ["finger_joint"]))
-    return robot.data.joint_pos[:, joint_ids[0]].to(torch.float32).unsqueeze(1)
+    joint_id = joint_ids[0]
+
+    pos = robot.data.joint_pos[:, joint_id].to(torch.float32)
+    # Clamp to the joint's own physical limits: an unclamped read of this value was found
+    # (2026-09-02) to have corrupted VecNormalize's running stats across multiple checkpoints
+    # (mean~277-439, std~7e7-9e7, versus a physically sane joint-position range), consistent
+    # with an occasional physics-instability spike poisoning the running normalization
+    # permanently. A genuine reading never leaves [lower, upper] anyway, so this is a no-op in
+    # the normal case and only clips the corrupting outliers.
+    limits = robot.data.joint_pos_limits[:, joint_id]
+    pos = pos.clamp(min=limits[:, 0], max=limits[:, 1])
+    return pos.unsqueeze(1)
 
 
 def stable_success_hint(env: "ManagerBasedRLEnv") -> torch.Tensor:

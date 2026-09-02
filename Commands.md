@@ -3,7 +3,7 @@ Reanudar
 
 python multi_order_cubes/scripts/train_sb3_sac.py \
   --num_envs 1024 --total_timesteps 20000000 \
-  --checkpoint logs/sb3/multi_order_cubes_sac/run_20260831_120709/final_sac.zip \
+  --checkpoint /media/lenena-iker/Crucial/logs/multi_order_cubes/sb3/multi_order_cubes_sac/run_20260831_120709/final_sac.zip \
   --learning_starts 4096 --lr_start 1.5e-4 \
   --headless --keep_all_info
 
@@ -14,8 +14,8 @@ Reanudar 2
 
 python multi_order_cubes/scripts/train_sb3_sac.py \
   --num_envs 1024 --total_timesteps 20000000 --headless --keep_all_info \
-  --checkpoint logs/sb3/multi_order_cubes_sac/run_20260831_14_lift/final_sac.zip \
-  --vecnormalize logs/sb3/multi_order_cubes_sac/run_20260831_14_lift/vecnormalize.pkl \
+  --checkpoint /media/lenena-iker/Crucial/logs/multi_order_cubes/sb3/multi_order_cubes_sac/run_20260831_14_lift/final_sac.zip \
+  --vecnormalize /media/lenena-iker/Crucial/logs/multi_order_cubes/sb3/multi_order_cubes_sac/run_20260831_14_lift/vecnormalize.pkl \
   --learning_starts 4096 --lr_start 1.5e-4
 
 ```
@@ -24,7 +24,7 @@ python multi_order_cubes/scripts/train_sb3_sac.py \
 
 ``` bash
 
-python multi_order_cubes/scripts/play_sb3.py   --checkpoint logs/sb3/multi_order_cubes_sac/run_20260831_14_lift/final_sac.zip   --vecnormalize logs/sb3/multi_order_cubes_sac/run_20260831_14_lift/vecnormalize.pkl   --diag_csv ./multi_order_cubes/assets/data/diagnostics.csv
+python multi_order_cubes/scripts/play_sb3.py   --checkpoint /media/lenena-iker/Crucial/logs/multi_order_cubes/sb3/multi_order_cubes_sac/run_20260831_14_lift/final_sac.zip   --vecnormalize /media/lenena-iker/Crucial/logs/multi_order_cubes/sb3/multi_order_cubes_sac/run_20260831_14_lift/vecnormalize.pkl   --diag_csv ./multi_order_cubes/assets/data/diagnostics.csv
 
 ```
 

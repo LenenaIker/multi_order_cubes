@@ -146,9 +146,13 @@ def reward_reach_z_gated(
     own center, so the reward is exactly 1.0 anywhere inside it instead of peaking only at
     dz=0 (the cube's own center, i.e. inside its solid volume). Without this, the optimum
     sat inside the cube, giving a live gradient to push the TCP down into solid geometry
-    with nothing rewarding a hover just above it. `flat_margin=0.03` was picked to clear the
-    largest cube variant's half-height with margin. `k_z`/`p` are unchanged from before and
-    still only control how the reward falls off beyond that flat radius, not its width.
+    with nothing rewarding a hover just above it. `flat_margin` must stay strictly between
+    the largest cube variant's half-height (0.021*1.2=0.0252, so the flat floor doesn't sink
+    inside the cube) and `success_z` in `reward_next_signal`/`reward_grasp_contact` (0.03,
+    the actual reach-success threshold): equal to success_z, as it was until 2026-09-01, means
+    this reward is already saturated at 1.0 everywhere outside the success zone, with zero
+    gradient left to actually cross into it. `k_z`/`p` are unchanged from before and still
+    only control how the reward falls off beyond that flat radius, not its width.
 
     Target is the cube's own center (no extra standoff): `ee_frame`'s body_offset already
     places the TCP at the intended grasp point (see config/ur10_gripper/moc_ur10_env_cfg.py).
@@ -262,9 +266,10 @@ def reward_next_signal(
 ) -> torch.Tensor:
     """Rewards pressing NEXT once the reach target is actually reached, penalizes early presses.
 
-    The bonus is one-shot, tied to `next_trigger_mask` (the same condition that actually makes
-    `consume_next_signal` resample the command), so it only fires on the exact step the command
-    changes. The penalty is deliberately NOT trigger-gated: it applies every step the policy
+    The bonus is one-shot, tied to `trigger & success` -- exactly the same condition that now
+    makes `consume_next_signal` actually resample the command (2026-09-01: it used to resample
+    on `trigger` alone, letting the policy abandon an unfulfilled command for free), so it only
+    fires on the exact step the command changes. The penalty is deliberately NOT trigger-gated: it applies every step the policy
     holds NEXT above threshold while not in the success zone, regardless of cooldown. A policy
     has no reason to release a continuous action once it discovers holding it is good, and an
     edge/cooldown-gated penalty would only ever catch the first press after an idle period,

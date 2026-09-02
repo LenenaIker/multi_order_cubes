@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING
 import torch
 from isaaclab.sim.schemas import activate_contact_sensors
 
-from .commands import latch_target_cube_from_command, sample_command_from_to
+from .commands import latch_target_cube_from_command, sample_command_from_to, update_slot_success_ema
 from .constants import CUBE_KEYS_9
+from .step_cache import get_active_cube_pos_w, invalidate_moc_cache
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -135,14 +136,72 @@ def moc_reset_on_reset(env: "ManagerBasedRLEnv", env_ids=None) -> None:
         if hasattr(env.scene, "write_data_to_sim"):
             env.scene.write_data_to_sim()
         if hasattr(env, "sim") and hasattr(env.sim, "step"):
-            env.sim.step()
-        if hasattr(env.scene, "update"):
+            # render=False: this settle step runs on every reset (including mid-training,
+            # headless runs) and previously always rendered because SimulationContext.step's
+            # `render` param defaults to True.
+            env.sim.step(render=False)
+        if hasattr(env.scene, "update") and hasattr(env, "sim") and hasattr(env.sim, "get_physics_dt"):
             try:
-                env.scene.update()
+                # InteractiveScene.update requires a `dt` argument; calling it with none (as
+                # this used to) raised TypeError on every reset and was silently swallowed by
+                # the except below, so asset data buffers were never actually refreshed after
+                # the settle step above.
+                env.scene.update(env.sim.get_physics_dt())
             except TypeError:
                 pass
     except Exception:
         pass
+
+    if env_ids is None:
+        settle_env_ids = torch.arange(env.num_envs, device=env.device)
+    else:
+        settle_env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=env.device)
+
+    # randomize_cubes_on_slots recorded moc_cube_home_pos_w from the COMMANDED slot pose
+    # (slot_positions' fixed z=0.021), which only matches the medium cube's actual resting
+    # height. The small/large variants settle a few mm below/above that after the physics
+    # step above (their collision half-height differs from the slot's calibrated z), which
+    # silently biased reward_object_lifted by cube size: audit 2026-09-01 found large cubes
+    # earning a permanent, unearned lift reward from the moment they spawn, and small cubes
+    # needing extra unrewarded lift before object_lifted starts paying at all. Overwrite with
+    # the pose actually settled by physics instead.
+    if (
+        settle_env_ids.numel() > 0
+        and hasattr(env, "moc_cube_home_pos_w")
+        and env.moc_cube_home_pos_w is not None
+    ):
+        invalidate_moc_cache(env)
+        env.moc_cube_home_pos_w[settle_env_ids] = get_active_cube_pos_w(env)[settle_env_ids]
+
+    # moc_next_cooldown/moc_next_signal previously survived across an episode reset: an env
+    # that pressed NEXT right before timing out began its next episode still under the old
+    # episode's cooldown, and that cooldown was fed straight into the policy's observation
+    # (next_cooldown_obs) as if it belonged to the new episode.
+    if hasattr(env, "moc_next_cooldown") and env.moc_next_cooldown is not None:
+        env.moc_next_cooldown[settle_env_ids] = 0
+    if hasattr(env, "moc_next_signal") and env.moc_next_signal is not None:
+        env.moc_next_signal[settle_env_ids] = 0.0
+
+    # Prioritized slot sampling (2026-09-02, see mdp/commands.py): before handing out a fresh
+    # command, record the outcome of whichever command this env is leaving behind. Most resets
+    # land here via time_out/cube_off_table while the command was never fulfilled (the
+    # consume_next_signal success path already resampled and reset the flag below for anything
+    # that succeeded), so this is effectively the "still stuck" failure signal for that from-slot.
+    # Guarded because command_from_to/moc_command_ever_success don't exist yet on the very first
+    # reset of a fresh env -- there is no prior command to score in that case.
+    if (
+        hasattr(env, "command_from_to") and env.command_from_to is not None
+        and hasattr(env, "moc_command_ever_success") and env.moc_command_ever_success is not None
+    ):
+        prev_from = env.command_from_to.index_select(0, settle_env_ids)[:, 0] - 1
+        valid = prev_from >= 0
+        if valid.any():
+            ever_success = env.moc_command_ever_success.index_select(0, settle_env_ids)
+            update_slot_success_ema(env, prev_from[valid], ever_success[valid])
+
+    if not hasattr(env, "moc_command_ever_success") or env.moc_command_ever_success is None:
+        env.moc_command_ever_success = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
+    env.moc_command_ever_success[settle_env_ids] = False
 
     sample_command_from_to(env, env_ids=env_ids)
     latch_target_cube_from_command(env, env_ids)
@@ -187,6 +246,17 @@ def consume_next_signal(
     `moc_next_cooldown` in between). Decrementing first and checking after, like the old
     code did, made the event's own trigger disagree with the reward's for the specific
     step where the cooldown crosses from 1 to 0, silently un-rewarding that resample.
+
+    A trigger alone does NOT resample: `env.moc_stable_success` (set by `reward_next_signal`
+    this same step, same ordering guarantee as above) must also be true. Without this, NEXT
+    was a free way to abandon a command the policy had failed to execute -- pay the small
+    per-step penalty in `reward_next_signal` and get handed a brand new (from, to) pair,
+    cooldown permitting, regardless of whether the old one was ever fulfilled. That let the
+    policy learn to bail on hard commands instead of solving them (audit finding, 2026-09-01:
+    slot1/slot2 collapsed to 0% grasp rate). A rejected press (triggered but not successful)
+    does NOT consume the cooldown either -- it already sits at <=0 for the trigger to have
+    fired, so leaving it alone (rather than resetting it) costs the policy nothing beyond the
+    existing reward penalty, and it can try again next step for free.
     """
     if not hasattr(env, "moc_next_cooldown") or env.moc_next_cooldown is None:
         env.moc_next_cooldown = torch.zeros((env.num_envs,), dtype=torch.long, device=env.device)
@@ -197,12 +267,31 @@ def consume_next_signal(
     trigger = next_trigger_mask(env, next_threshold=next_threshold, cooldown_steps=cooldown_steps).index_select(
         0, env_ids
     )
-    trigger_ids = env_ids[trigger]
-    idle_ids = env_ids[~trigger]
+
+    if hasattr(env, "moc_stable_success") and env.moc_stable_success is not None:
+        success = env.moc_stable_success.index_select(0, env_ids) > 0.5
+    else:
+        success = torch.zeros_like(trigger)
+
+    # Prioritized slot sampling (2026-09-02, see mdp/commands.py): record "ever succeeded" every
+    # step, not just on a trigger, so a command that reaches moc_stable_success without the
+    # policy pressing NEXT that exact step still scores correctly if the episode ends before it
+    # presses NEXT at all.
+    if not hasattr(env, "moc_command_ever_success") or env.moc_command_ever_success is None:
+        env.moc_command_ever_success = torch.zeros((env.num_envs,), dtype=torch.bool, device=env.device)
+    env.moc_command_ever_success[env_ids] |= success
+
+    resample = trigger & success
+    trigger_ids = env_ids[resample]
+    idle_ids = env_ids[~resample]
 
     if idle_ids.numel() > 0:
         env.moc_next_cooldown[idle_ids] = (env.moc_next_cooldown.index_select(0, idle_ids) - 1).clamp(min=0)
 
     if trigger_ids.numel() > 0:
+        prev_from = env.command_from_to.index_select(0, trigger_ids)[:, 0] - 1
+        update_slot_success_ema(env, prev_from, torch.ones_like(prev_from, dtype=torch.bool))
+
         sample_command_from_to(env, env_ids=trigger_ids)
         env.moc_next_cooldown[trigger_ids] = int(cooldown_steps)
+        env.moc_command_ever_success[trigger_ids] = False

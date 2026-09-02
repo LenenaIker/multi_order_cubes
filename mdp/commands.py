@@ -7,6 +7,47 @@ import torch
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
+# Prioritized from-slot sampling (2026-09-02): counters the "rich get richer" dynamic where
+# consume_next_signal's success-gated resample lets an already-mastered slot cycle through many
+# more episodes than a still-unsolved one, which just piles up dead time instead of ever
+# practicing the hard slot. Weighting the draw by (1 - success_rate) biases new commands toward
+# whichever slot is currently worst, without touching the "no free bail" gate itself.
+_SLOT_SUCCESS_EMA_BETA = 0.05    # how fast the per-slot estimate reacts to new outcomes
+_SLOT_PRIORITY_ALPHA = 1.0       # sharpness of the (1 - success_rate) weighting
+_SLOT_PRIORITY_FLOOR = 0.05      # minimum relative weight for a solved slot, so it never stops being practiced
+
+
+def _ensure_slot_success_ema(env: "ManagerBasedRLEnv") -> torch.Tensor:
+    if not hasattr(env, "moc_slot_success_ema") or env.moc_slot_success_ema is None:
+        env.moc_slot_success_ema = torch.zeros((4,), dtype=torch.float32, device=env.device)
+    return env.moc_slot_success_ema
+
+
+def update_slot_success_ema(
+    env: "ManagerBasedRLEnv",
+    from_slot_0based: torch.Tensor,
+    success_mask: torch.Tensor,
+) -> None:
+    """Update the global (not per-env) per-slot success EMA with a batch of command outcomes.
+
+    `from_slot_0based`/`success_mask` are equal-length 1D tensors, one entry per env whose
+    command just ended (either resampled after success, or reset while still unsolved). Looped
+    over the 4 fixed slot values (cheap, num_slots is a hard constant) rather than scattered,
+    so multiple envs reporting the same slot in one call average together instead of
+    overwriting each other.
+    """
+    ema = _ensure_slot_success_ema(env)
+    if from_slot_0based.numel() == 0:
+        return
+
+    outcome = success_mask.to(torch.float32)
+    for s in range(4):
+        mask = from_slot_0based == s
+        if mask.any():
+            batch_rate = outcome[mask].mean()
+            ema[s] = (1.0 - _SLOT_SUCCESS_EMA_BETA) * ema[s] + _SLOT_SUCCESS_EMA_BETA * batch_rate
+    ema.clamp_(0.0, 1.0)
+
 
 def _ensure_command_buffers(env: "ManagerBasedRLEnv") -> None:
     if not hasattr(env, "command_from_to") or env.command_from_to is None:
@@ -85,8 +126,10 @@ def sample_command_from_to(
     occupied = slot_to_active >= 0
     empty = ~occupied
 
-    probs_from = occupied.to(torch.float32)
-    probs_from = probs_from / probs_from.sum(dim=1, keepdim=True).clamp(min=1.0)
+    success_ema = _ensure_slot_success_ema(env)
+    priority = (1.0 - success_ema).clamp(min=0.0) ** _SLOT_PRIORITY_ALPHA + _SLOT_PRIORITY_FLOOR
+    probs_from = occupied.to(torch.float32) * priority.view(1, 4)
+    probs_from = probs_from / probs_from.sum(dim=1, keepdim=True).clamp(min=1e-6)
     from_idx = torch.multinomial(probs_from, num_samples=1).squeeze(1)
 
     probs_to = empty.to(torch.float32)

@@ -107,6 +107,15 @@ class RewardsCfg:
     reach_z = RewTerm(
         func=mdp.reward_reach_z_gated,
         weight=WEIGHT_REACH_Z,
+        # flat_margin=0.03, cooldown=30 (2026-09-02, ablation "Run 3"): both restored to the
+        # exact values `14_lift` was trained with. Three 5M-step ablation runs off `14_lift`
+        # (cd=90/fm=0.03, cd=30/fm=0.027, cd=30/fm=0.03) all collapsed to ~99-100% not_trying /
+        # 0% grasping with no reliably distinguishable difference between them (see
+        # project_moc_diag_ablation_20260902 memory) -- 5M steps after a resume looks too short
+        # to tell cooldown/flat_margin apart from noise. This is now a 20M-step run of the Run 3
+        # config (i.e. no reward-shape change from `14_lift` at all, only the mdp/events.py
+        # NEXT-resample-requires-success fix + reset-buffer fixes) to see if signal recovers
+        # with real budget, same pattern as every prior Grasp/Lift phase in this project.
         params=dict(k_z=0.06, p=1.0, gate_dxy=0.18, gate_band=0.05, flat_margin=0.03, weight=WEIGHT_REACH_Z),
     )
 

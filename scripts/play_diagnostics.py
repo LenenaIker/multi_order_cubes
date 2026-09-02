@@ -20,7 +20,12 @@ SIZE_NAMES = ("s", "m", "l")             # idx % 3 into CUBE_KEYS_9
 COLOR_NAMES = ("light", "flat", "dark")  # idx // 3 into CUBE_KEYS_9
 STATE_NAMES = ("not_trying", "hovering", "attempting", "grasping")
 
-# Match reward_grasp_contact / reward_next_signal defaults (mdp/rewards.py) for consistency.
+# Match reward_next_signal's CONFIGURED values (moc_env_cfg.py's next_signal RewTerm, not just
+# the function signature default) -- this is the actual reach-success zone that gates the NEXT
+# bonus/moc_stable_success. NOT the same as reward_grasp_contact's own configured gate, which
+# moc_env_cfg.py currently sets much looser (success_xy=success_z=0.5): "grasping" here is
+# stricter than what the live grasp_contact reward actually requires (audit finding, 2026-09-01;
+# flagged to the user, not changed here since it's a reward-tuning value, not a logging bug).
 SUCCESS_XY = 0.05
 SUCCESS_Z = 0.03
 # Match diag_grip_distance's own closed_threshold (mdp/rewards.py) for consistency.
